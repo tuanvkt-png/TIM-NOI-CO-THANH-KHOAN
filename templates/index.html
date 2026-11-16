@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phân tích Kỹ thuật Tự động — Setup Lệnh</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<script src="/static/js/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="brand">📈 Phân tích Kỹ thuật Tự động</div>
+    <div class="subtitle">Hỗ trợ / Kháng • Trendline • Mẫu hình • Setup chuẩn Entry / SL / TP</div>
+  </header>
+
+  <section class="controls">
+    <div class="control-group">
+      <label for="symbolSelect">Chọn mã</label>
+      <select id="symbolSelect">
+        {% for cat, syms in categories.items() %}
+        <optgroup label="{{ cat }}">
+          {% for s in syms %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+        </optgroup>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="control-group">
+      <label for="intervalSelect">Khung thời gian</label>
+      <select id="intervalSelect">
+        <option value="15m">15 phút</option>
+        <option value="30m">30 phút</option>
+        <option value="1h" selected>1 giờ</option>
+        <option value="4h">4 giờ</option>
+        <option value="1d">1 ngày</option>
+        <option value="1wk">1 tuần</option>
+      </select>
+    </div>
+    <div class="control-group">
+      <label for="cycleSelect">Chu kỳ quét</label>
+      <select id="cycleSelect">
+        <option value="manual" selected>Thủ công (bấm nút)</option>
+        <option value="daily">Hàng ngày</option>
+        <option value="weekly">Hàng tuần</option>
+      </select>
+    </div>
+    <div class="control-group actions">
+      <button id="btnScan" class="btn btn-primary" type="button">🔍 Quét ngay</button>
+      <button id="btnScanAll" class="btn btn-secondary" type="button">📊 Quét tất cả</button>
+    </div>
+  </section>
+
+  <div id="statusBar" class="status-bar">Sẵn sàng — chọn mã rồi bấm “Quét ngay”.</div>
+
+  <section class="main">
+    <div class="chart-panel">
+      <div id="chartContainer" class="chart-container"></div>
+      <div id="chartInfo" class="chart-info"></div>
+    </div>
+
+    <aside class="setups-panel">
+      <h3>🎯 Setup chuẩn</h3>
+      <div id="setupsList" class="setups-list">
+        <div class="empty">Chọn mã và nhấn “Quét ngay” để xem setup.</div>
+      </div>
+    </aside>
+  </section>
+
+  <footer class="footer">
+    Dữ liệu nến: Yahoo Finance. Kết quả do thuật toán tự động sinh ra — <strong>không phải lời khuyên đầu tư</strong>.
+    Luôn quản lý rủi ro trước khi vào lệnh.
+  </footer>
+</div>
+<script src="/static/js/app.js"></script>
+</body>
+</html>
