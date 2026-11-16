@@ -4,7 +4,7 @@ from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from .analyzer import analyze_symbol
-from .data_fetcher import SYMBOLS, fetch_ohlcv
+from .data_fetcher import SYMBOLS, fetch_ohlcv, get_info
 
 scheduler = BackgroundScheduler(timezone="UTC")
 RESULTS_FILE = "scan_results.json"
@@ -28,15 +28,21 @@ def run_full_scan(interval: str = "1h", limit: int | None = None) -> dict:
             if df is None or df.empty:
                 results[symbol] = {"error": "Không có dữ liệu"}
                 continue
-            a = analyze_symbol(df, symbol, interval)
+            a = analyze_symbol(df, symbol, interval, get_info(symbol))
             results[symbol] = {
                 "symbol": symbol,
+                "name": a["name"],
+                "cat": a["cat"],
+                "sub": a["sub"],
                 "interval": interval,
                 "current_price": a["current_price"],
                 "setups": a["setups"],
                 "patterns": a["patterns"],
                 "supports": a["supports"],
                 "resistances": a["resistances"],
+                "score": a["score"],
+                "grade": a["grade"],
+                "direction": a["direction"],
             }
         except Exception as e:
             results[symbol] = {"error": str(e)}
@@ -57,8 +63,8 @@ def _job_scan():
 def start_scheduler():
     if scheduler.running:
         return
-    scheduler.add_job(_job_scan, "interval", hours=6, id="auto_scan", replace_existing=True,
-                      max_instances=1, coalesce=True)
+    scheduler.add_job(_job_scan, "interval", hours=6, id="auto_scan",
+                      replace_existing=True, max_instances=1, coalesce=True)
     scheduler.start()
     print("[scheduler] Đã khởi động APScheduler (quét mỗi 6 giờ)")
 

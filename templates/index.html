@@ -11,16 +11,19 @@
 <div class="app">
   <header class="header">
     <div class="brand">📈 Phân tích Kỹ thuật Tự động</div>
-    <div class="subtitle">Hỗ trợ / Kháng • Trendline • Mẫu hình • Setup chuẩn Entry / SL / TP</div>
+    <div class="subtitle">Hỗ trợ / Kháng • Trendline • Mẫu hình • Checklist điều kiện • Setup Entry / SL / TP</div>
   </header>
 
   <section class="controls">
-    <div class="control-group">
+    <div class="control-group grow">
       <label for="symbolSelect">Chọn mã</label>
       <select id="symbolSelect">
         {% for cat, syms in categories.items() %}
         <optgroup label="{{ cat }}">
-          {% for s in syms %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+          {% for t in syms %}
+          {% set inf = symbol_info | selectattr('t','equalto',t) | first %}
+          <option value="{{ t }}">{{ inf.name if inf else t }}{% if inf %} — {{ inf.sub }}{% endif %}</option>
+          {% endfor %}
         </optgroup>
         {% endfor %}
       </select>
@@ -28,12 +31,9 @@
     <div class="control-group">
       <label for="intervalSelect">Khung thời gian</label>
       <select id="intervalSelect">
-        <option value="15m">15 phút</option>
-        <option value="30m">30 phút</option>
-        <option value="1h" selected>1 giờ</option>
-        <option value="4h">4 giờ</option>
-        <option value="1d">1 ngày</option>
-        <option value="1wk">1 tuần</option>
+        {% for k, v in intervals.items() %}
+        <option value="{{ k }}"{% if k == '1h' %} selected{% endif %}>{{ v.label }}</option>
+        {% endfor %}
       </select>
     </div>
     <div class="control-group">
@@ -50,6 +50,11 @@
     </div>
   </section>
 
+  <div id="assetBadge" class="asset-badge">
+    <span class="badge-cat">—</span>
+    <span class="badge-name">Đang tải…</span>
+  </div>
+
   <div id="statusBar" class="status-bar">Sẵn sàng — chọn mã rồi bấm “Quét ngay”.</div>
 
   <section class="main">
@@ -58,10 +63,38 @@
       <div id="chartInfo" class="chart-info"></div>
     </div>
 
-    <aside class="setups-panel">
-      <h3>🎯 Setup chuẩn</h3>
-      <div id="setupsList" class="setups-list">
-        <div class="empty">Chọn mã và nhấn “Quét ngay” để xem setup.</div>
+    <aside class="side-panel">
+      <div class="tabs">
+        <button class="tab active" data-tab="setup" type="button">🎯 Setup &amp; Checklist</button>
+        <button class="tab" data-tab="pretty" type="button">⭐ Cặp có setup đẹp</button>
+        <button class="tab" data-tab="watch" type="button">📋 Watchlist</button>
+      </div>
+
+      <div id="tab-setup" class="tab-body active">
+        <div id="setupsList" class="setups-list">
+          <div class="empty">Chọn mã và nhấn “Quét ngay” để xem setup.</div>
+        </div>
+      </div>
+
+      <div id="tab-pretty" class="tab-body">
+        <div class="pretty-head">
+          <span>Quét các mã trong Watchlist — chỉ hiện mã có setup đẹp</span>
+          <button id="btnPretty" class="btn btn-primary btn-sm" type="button">⭐ Quét setup đẹp</button>
+        </div>
+        <div id="prettyList" class="setups-list">
+          <div class="empty">Bấm “Quét setup đẹp” để tìm các cặp đang có setup tốt nhất.</div>
+        </div>
+      </div>
+
+      <div id="tab-watch" class="tab-body">
+        <div class="watch-head">
+          <span>Chọn các mã muốn theo dõi (dùng cho tab setup đẹp)</span>
+          <div class="watch-actions">
+            <button id="btnWatchAll" class="btn btn-secondary btn-sm" type="button">Chọn tất cả</button>
+            <button id="btnWatchSave" class="btn btn-primary btn-sm" type="button">💾 Lưu</button>
+          </div>
+        </div>
+        <div id="watchList" class="watch-list"></div>
       </div>
     </aside>
   </section>

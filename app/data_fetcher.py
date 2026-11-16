@@ -6,23 +6,59 @@ Nếu thất bại thì fallback sang yfinance.
 import json
 import urllib.parse
 import urllib.request
+
 import pandas as pd
 
-SYMBOLS = {
-    "FX (Ngoại hối)": ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X", "USDCAD=X", "USDCHF=X"],
-    "Crypto": ["BTC-USD", "ETH-USD", "XRP-USD", "SOL-USD", "ADA-USD"],
-    "Kim loại / Năng lượng": ["GC=F", "SI=F", "CL=F", "NG=F", "HG=F"],
-    "Chỉ số": ["^DJI", "^IXIC", "^GSPC", "^VIX", "^N225"],
-    "Cổ phiếu": ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"],
-}
+# Mỗi mã: ticker Yahoo, tên hiển thị, nhóm tài sản, đơn vị
+SYMBOL_INFO = [
+    # FX
+    {"t": "EURUSD=X", "name": "EUR/USD", "cat": "Ngoại hối", "sub": "EUR/USD", "unit": "USD"},
+    {"t": "GBPUSD=X", "name": "GBP/USD", "cat": "Ngoại hối", "sub": "GBP/USD", "unit": "USD"},
+    {"t": "USDJPY=X", "name": "USD/JPY", "cat": "Ngoại hối", "sub": "USD/JPY", "unit": "JPY"},
+    {"t": "AUDUSD=X", "name": "AUD/USD", "cat": "Ngoại hối", "sub": "AUD/USD", "unit": "USD"},
+    {"t": "USDCAD=X", "name": "USD/CAD", "cat": "Ngoại hối", "sub": "USD/CAD", "unit": "CAD"},
+    {"t": "USDCHF=X", "name": "USD/CHF", "cat": "Ngoại hối", "sub": "USD/CHF", "unit": "CHF"},
+    # Kim loại quý
+    {"t": "GC=F", "name": "Vàng giao sau", "cat": "Kim loại quý", "sub": "XAUUSD (Gold Futures)", "unit": "USD/oz"},
+    {"t": "SI=F", "name": "Bạc giao sau", "cat": "Kim loại quý", "sub": "XAGUSD (Silver Futures)", "unit": "USD/oz"},
+    {"t": "HG=F", "name": "Đồng giao sau", "cat": "Kim loại quý", "sub": "Copper Futures", "unit": "USD/lb"},
+    # Năng lượng
+    {"t": "CL=F", "name": "Dầu thô WTI", "cat": "Năng lượng", "sub": "WTI Crude Oil", "unit": "USD/thùng"},
+    {"t": "NG=F", "name": "Khí tự nhiên", "cat": "Năng lượng", "sub": "Natural Gas", "unit": "USD/MMBtu"},
+    # Crypto
+    {"t": "BTC-USD", "name": "Bitcoin", "cat": "Tiền mã hoá", "sub": "BTC/USD", "unit": "USD"},
+    {"t": "ETH-USD", "name": "Ethereum", "cat": "Tiền mã hoá", "sub": "ETH/USD", "unit": "USD"},
+    {"t": "XRP-USD", "name": "Ripple", "cat": "Tiền mã hoá", "sub": "XRP/USD", "unit": "USD"},
+    {"t": "SOL-USD", "name": "Solana", "cat": "Tiền mã hoá", "sub": "SOL/USD", "unit": "USD"},
+    {"t": "ADA-USD", "name": "Cardano", "cat": "Tiền mã hoá", "sub": "ADA/USD", "unit": "USD"},
+    # Chỉ số
+    {"t": "^DJI", "name": "Dow Jones 30", "cat": "Chỉ số", "sub": "US30 / DJIA", "unit": "điểm"},
+    {"t": "^IXIC", "name": "Nasdaq Composite", "cat": "Chỉ số", "sub": "US100 / NASDAQ", "unit": "điểm"},
+    {"t": "^GSPC", "name": "S&P 500", "cat": "Chỉ số", "sub": "SPX", "unit": "điểm"},
+    {"t": "^N225", "name": "Nikkei 225", "cat": "Chỉ số", "sub": "JP225", "unit": "điểm"},
+    {"t": "^VIX", "name": "VIX – Chỉ số sợ hãi", "cat": "Chỉ số", "sub": "Volatility Index", "unit": "điểm"},
+    # Cổ phiếu
+    {"t": "AAPL", "name": "Apple Inc.", "cat": "Cổ phiếu", "sub": "AAPL", "unit": "USD"},
+    {"t": "TSLA", "name": "Tesla Inc.", "cat": "Cổ phiếu", "sub": "TSLA", "unit": "USD"},
+    {"t": "NVDA", "name": "NVIDIA Corp.", "cat": "Cổ phiếu", "sub": "NVDA", "unit": "USD"},
+    {"t": "MSFT", "name": "Microsoft Corp.", "cat": "Cổ phiếu", "sub": "MSFT", "unit": "USD"},
+    {"t": "AMZN", "name": "Amazon.com Inc.", "cat": "Cổ phiếu", "sub": "AMZN", "unit": "USD"},
+]
+
+INFO_BY_TICKER = {x["t"]: x for x in SYMBOL_INFO}
+
+# Giữ dạng dict theo nhóm để tương thích code cũ
+SYMBOLS: dict[str, list[str]] = {}
+for _x in SYMBOL_INFO:
+    SYMBOLS.setdefault(_x["cat"], []).append(_x["t"])
 
 INTERVALS = {
-    "15m": {"interval": "15m", "range": "1mo"},
-    "30m": {"interval": "30m", "range": "2mo"},
-    "1h": {"interval": "1h", "range": "6mo"},
-    "4h": {"interval": "1h", "range": "1y", "resample": "4h"},
-    "1d": {"interval": "1d", "range": "2y"},
-    "1wk": {"interval": "1wk", "range": "5y"},
+    "15m": {"interval": "15m", "range": "1mo", "label": "15 phút"},
+    "30m": {"interval": "30m", "range": "2mo", "label": "30 phút"},
+    "1h": {"interval": "1h", "range": "6mo", "label": "1 giờ"},
+    "4h": {"interval": "1h", "range": "1y", "resample": "4h", "label": "4 giờ"},
+    "1d": {"interval": "1d", "range": "2y", "label": "1 ngày"},
+    "1wk": {"interval": "1wk", "range": "5y", "label": "1 tuần"},
 }
 
 _HEADERS = {
@@ -33,6 +69,12 @@ _HEADERS = {
     "Accept": "application/json,text/plain,*/*",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+
+def get_info(ticker: str) -> dict:
+    return INFO_BY_TICKER.get(
+        ticker, {"t": ticker, "name": ticker, "cat": "Khác", "sub": ticker, "unit": ""}
+    )
 
 
 def _fetch_yahoo_http(symbol: str, interval: str, rng: str) -> pd.DataFrame | None:
@@ -78,7 +120,9 @@ def _fetch_yfinance(symbol: str, interval: str, period: str) -> pd.DataFrame | N
     if df is None or df.empty:
         return None
     df = df.rename(columns=str.lower)
-    df = df[["open", "high", "low", "close", "volume"]].dropna(subset=["open", "high", "low", "close"])
+    df = df[["open", "high", "low", "close", "volume"]].dropna(
+        subset=["open", "high", "low", "close"]
+    )
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
     df.index.name = "datetime"
