@@ -225,18 +225,71 @@ function setupCardHTML(s) {
       <table class="setup-table">
         <tr><td>Entry</td><td class="mono">${fmt(s.entry)}</td></tr>
         <tr><td>Stop Loss</td><td class="mono red">${fmt(s.sl)}</td></tr>
-        <tr><td>Take Profit</td><td class="mono green">${fmt(s.tp)}</td></tr>
+        <tr><td>Take Profit 1</td><td class="mono green">${fmt(s.tp)}</td></tr>
+        ${s.tp2 ? `<tr><td>Take Profit 2</td><td class="mono green">${fmt(s.tp2)}</td></tr>` : ""}
         <tr><td>R:R</td><td class="mono"><strong>1 : ${s.rr}</strong></td></tr>
       </table>
+      ${s.tp_source ? `<div class="tp-source">🎯 ${s.tp_source}</div>` : ""}
       <div class="ck-title">✅ Checklist điều kiện vào lệnh</div>
       ${checklistHTML(s)}
       <ul class="reasons">${(s.reasons || []).map((r) => `<li>${r}</li>`).join("")}</ul>
     </div>`;
 }
 
+function cycleBannerHTML(data) {
+  const L = data.lock || {};
+  if (!L.locked && !L.state) return "";
+
+  if (L.locked) {
+    const cls = L.side === "BUY" ? "buy" : "sell";
+    const blocked = L.blocked_signals || 0;
+    return `
+      <div class="cycle-banner locked ${cls}">
+        <div class="cycle-head">
+          <span class="lock-icon">🔒</span>
+          <strong>HƯỚNG ĐANG KHOÁ: ${L.side === "BUY" ? "MUA (BUY)" : "BÁN (SELL)"}</strong>
+          <span class="cycle-state">${L.state_label || ""}</span>
+        </div>
+        <div class="cycle-body">
+          <span>Mở lúc <b>${L.opened_at ? L.opened_at.replace("T", " ").slice(0, 16) : "—"}</b>
+            · đã qua <b>${L.bars_alive || 0}</b> nến</span>
+          <span>Entry <b>${fmt(L.entry)}</b> · SL <b class="red">${fmt(L.sl)}</b>
+            · TP1 <b class="green">${fmt(L.tp1)}</b></span>
+          ${blocked > 0 ? `<span class="blocked">⛔ Đã bỏ qua <b>${blocked}</b> tín hiệu ngược chiều</span>` : ""}
+        </div>
+        <div class="cycle-note">
+          Web KHÔNG lật hướng cho tới khi thủng SL, chạm TP1, hoặc hết hạn.
+        </div>
+      </div>`;
+  }
+
+  if (L.just_closed) {
+    const map = {
+      DA_CHAM_TP: ["✅", "Chu kỳ trước đã CHẠM MỤC TIÊU", "green"],
+      THUNG_SL: ["❌", "Chu kỳ trước đã THỦNG SL", "red"],
+      HET_HAN: ["⌛", "Chu kỳ trước HẾT HẠN", "gray"],
+    };
+    const m = map[L.just_closed] || ["•", "Chu kỳ trước đã đóng", "gray"];
+    return `
+      <div class="cycle-banner closed ${m[2]}">
+        <strong>${m[0]} ${m[1]}</strong>
+        ${L.closed_event ? `<div class="cycle-note">${L.closed_event}</div>` : ""}
+        <div class="cycle-note">Đây là phân tích CHU KỲ MỚI.</div>
+      </div>`;
+  }
+  return "";
+}
+
 function renderSetups(data) {
   setupsList.innerHTML = "";
   const setups = data.setups || [];
+
+  const banner = cycleBannerHTML(data);
+  if (banner) {
+    const b = document.createElement("div");
+    b.innerHTML = banner;
+    setupsList.appendChild(b.firstElementChild);
+  }
 
   if (!setups.length) {
     setupsList.innerHTML =
@@ -346,7 +399,7 @@ async function scanPretty() {
     if (!list.length) {
       prettyList.innerHTML =
         `<div class="empty">Không có mã nào đạt tiêu chí “setup đẹp” trong watchlist.<br>
-         (Yêu cầu: ≥3/4 điều kiện hội tụ · R:R ≥ 1.5 · Điểm ≥ 55)<br><br>
+         (Yêu cầu: ≥3/5 điều kiện · R:R ≥ 1.5 · Điểm ≥ 55)<br><br>
          Đã quét ${data.scanned} mã · ${data.interval}</div>`;
       setStatus(`Đã quét ${data.scanned} mã — chưa có setup đẹp nào`, "ok");
       return;

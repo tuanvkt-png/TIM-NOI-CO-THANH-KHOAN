@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 
 from .analyzer import analyze_symbol
 from .data_fetcher import fetch_ohlcv, get_info
+from . import setup_state as st_mod
 
 # Ngưỡng "setup đẹp": ≥3/4 điều kiện HỘI TỤ, R:R ≥ 1.5, điểm ≥ 55
 MIN_PASSED = 3
@@ -14,12 +15,12 @@ MIN_RR = 1.5
 MIN_SCORE = 55.0
 
 
-def _scan_one(ticker: str, interval: str) -> Dict:
+def _scan_one(ticker: str, interval: str, locked: Optional[Dict] = None) -> Dict:
     try:
         df = fetch_ohlcv(ticker, interval)
         if df is None or df.empty:
             return {"ticker": ticker, "error": "Không có dữ liệu"}
-        a = analyze_symbol(df, ticker, interval, get_info(ticker))
+        a = analyze_symbol(df, ticker, interval, get_info(ticker), locked=locked)
         best = a["setups"][0] if a["setups"] else None
         return {
             "ticker": ticker,
@@ -36,6 +37,8 @@ def _scan_one(ticker: str, interval: str) -> Dict:
             "entry": best["entry"] if best else None,
             "sl": best["sl"] if best else None,
             "tp": best["tp"] if best else None,
+            "tp2": best.get("tp2") if best else None,
+            "lock": a.get("lock") or {},
             "error": None,
         }
     except Exception as e:
@@ -48,8 +51,12 @@ def scan_watchlist(tickers: List[str], interval: str = "1h",
     if not tickers:
         return results
 
+    state = st_mod.load_state()
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_scan_one, t, interval): t for t in tickers}
+        futures = {
+            pool.submit(_scan_one, t, interval, state.get(st_mod._key(t, interval))): t
+            for t in tickers
+        }
         for fut in as_completed(futures):
             results.append(fut.result())
 

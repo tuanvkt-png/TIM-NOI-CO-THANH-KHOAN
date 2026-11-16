@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -7,6 +9,7 @@ from .analyzer import analyze_symbol
 from .data_fetcher import INFO_BY_TICKER, INTERVALS, SYMBOL_INFO, SYMBOLS, fetch_ohlcv, get_info
 from .db import get_settings, init_db, save_settings
 from .scheduler import run_full_scan, start_scheduler, stop_scheduler
+from . import setup_state as st_mod
 from .watchlist import scan_watchlist
 
 app = FastAPI(title="Phân tích Kỹ thuật Tự động")
@@ -52,7 +55,15 @@ async def api_symbols():
 
 
 @app.get("/api/scan")
-async def api_scan(symbol: str = Query(...), interval: str = Query("1h")):
+async def api_scan(symbol: str = Query(...), interval: str = Query("1h"),
+                   reset: bool = Query(False)):
+    """Phân tích một mã.
+
+    Có KHOÁ HƯỚNG: nếu mã đang có setup sống thì giữ nguyên hướng đó,
+    không lật BUY/SELL mỗi lần refresh.
+
+    reset=true -> xoá trạng thái, phân tích lại từ đầu.
+    """
     if interval not in INTERVALS:
         raise HTTPException(status_code=400, detail=f"Khung thời gian không hợp lệ: {interval}")
     try:
@@ -61,7 +72,94 @@ async def api_scan(symbol: str = Query(...), interval: str = Query("1h")):
         raise HTTPException(status_code=502, detail=f"Lỗi lấy dữ liệu: {e}")
     if df is None or df.empty:
         raise HTTPException(status_code=404, detail=f"Không có dữ liệu cho {symbol} ({interval})")
-    return JSONResponse(analyze_symbol(df, symbol, interval, get_info(symbol)))
+
+    key = st_mod._key(symbol, interval)
+    state = st_mod.load_state()
+    if reset:
+        state.pop(key, None)
+        st_mod.save_state(state)
+
+    locked = state.get(key)
+    result = analyze_symbol(df, symbol, interval, get_info(symbol), locked=locked)
+
+    # Cập nhật / tạo mới bản ghi trạng thái
+    candles = result.get("candles") or []
+    best = result["setups"][0] if result["setups"] else None
+    lock = result.get("lock") or {}
+
+    if lock.get("locked"):
+        # Đang khoá -> chỉ cập nhật tiến trình, giữ nguyên record gốc
+        rec = dict(locked) if locked else {}
+        rec = st_mod.evaluate(rec, candles, interval) if rec else {}
+        if rec:
+            rec["blocked_signals"] = lock.get("blocked_signals", rec.get("blocked_signals", 0))
+            state[key] = rec
+            st_mod.save_state(state)
+    elif lock.get("just_closed"):
+        # Vừa đóng -> cho phép tạo chu kỳ mới nếu có setup
+        if best:
+            state[key] = _new_record(symbol, interval, best, result, candles)
+        else:
+            state.pop(key, None)
+        st_mod.save_state(state)
+    elif best:
+        # Không có gì khoá -> tạo chu kỳ mới
+        state[key] = _new_record(symbol, interval, best, result, candles)
+        st_mod.save_state(state)
+
+    return JSONResponse(result)
+
+
+def _new_record(symbol: str, interval: str, best: dict, result: dict, candles: list) -> dict:
+    """Tạo bản ghi chu kỳ mới từ setup tốt nhất."""
+    opened_ts = candles[-1]["time"] if candles else int(datetime.now(tz=timezone.utc).timestamp())
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "side": best["type"],
+        "entry": best["entry"],
+        "sl": best["sl"],
+        "tp1": best["tp"],
+        "tp2": best.get("tp2"),
+        "score": best["score"],
+        "grade": best["grade"],
+        "pattern": best.get("pattern"),
+        "opened_time": opened_ts,
+        "opened_at": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+        "state": "CHO",
+        "bars_alive": 0,
+        "blocked_signals": 0,
+        "event": None,
+    }
+
+
+@app.get("/api/state")
+async def api_state(symbol: str = Query(...), interval: str = Query("1h")):
+    """Xem trạng thái chu kỳ hiện tại của một mã."""
+    state = st_mod.load_state()
+    rec = state.get(st_mod._key(symbol, interval))
+    return JSONResponse(st_mod.describe(rec))
+
+
+@app.get("/api/state-all")
+async def api_state_all():
+    """Xem toàn bộ chu kỳ đang lưu."""
+    state = st_mod.load_state()
+    return JSONResponse({
+        k: st_mod.describe(v) for k, v in state.items()
+    })
+
+
+@app.get("/api/state-reset")
+async def api_state_reset(symbol: str = Query(None), interval: str = Query(None)):
+    """Xoá trạng thái chu kỳ (một mã hoặc toàn bộ)."""
+    state = st_mod.load_state()
+    if symbol:
+        state.pop(st_mod._key(symbol, interval or "1h"), None)
+    else:
+        state = {}
+    st_mod.save_state(state)
+    return {"status": "ok", "remaining": len(state)}
 
 
 @app.get("/api/scan-all")

@@ -16,6 +16,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from . import setup_state as st_mod
+
 
 # ------------------------------------------------------------ swing & cluster
 def _swing_points(df: pd.DataFrame, window: int = 5):
@@ -107,6 +109,70 @@ def _touches_recent(df: pd.DataFrame, line: Optional[Dict], tol: float = 0.004,
         if abs(price - y) / y <= tol:
             cnt += 1
     return cnt
+
+
+
+# ------------------------------------------------------- liquidity targets
+def _liquidity_targets(side: str, close: float, highs: List[Tuple], lows: List[Tuple],
+                       atr: float) -> List[float]:
+    """Tìm các MỤC TIÊU THANH KHOẢN phía trước — nơi đám đông đặt SL.
+
+    Với BUY  : các ĐỈNH phía trên giá (SL của phe SELL đang nằm trên đỉnh)
+    Với SELL : các ĐÁY phía dưới giá  (SL của phe BUY đang nằm dưới đáy)
+
+    MM thường đẩy giá tới đúng các mức này để quét SL trước khi đảo chiều,
+    nên đây là mục tiêu TP hợp lý hơn ATR×3 rất nhiều.
+
+    Trả về danh sách đã sắp xếp theo khoảng cách tăng dần (gần -> xa),
+    đã lọc bỏ mức quá gần (< 0.4 ATR, nhiễu) và quá xa (> 12 ATR, phi thực tế).
+    """
+    pool = []
+    if side == "BUY":
+        pool = [p for _, p in highs if p > close * 1.002]
+        pool.sort()
+    else:
+        pool = [p for _, p in lows if p < close * 0.998]
+        pool.sort(reverse=True)
+
+    out: List[float] = []
+    for p in pool:
+        dist = abs(p - close)
+        if dist < atr * 0.4 or dist > atr * 12:
+            continue
+        # gộp các mức sát nhau (< 0.5 ATR) để không ra 2 mục tiêu trùng
+        if out and abs(p - out[-1]) < atr * 0.5:
+            continue
+        out.append(round(p, 6))
+        if len(out) >= 4:
+            break
+    return out
+
+
+def _pick_tp(side: str, close: float, sl: float, targets: List[float],
+             atr: float) -> Tuple[float, Optional[float], str]:
+    """Chọn TP1 / TP2 từ danh sách mục tiêu thanh khoản.
+
+    Yêu cầu: TP1 phải cho R:R >= 1.5 (nếu không đủ thì nới ra ATR).
+    Trả về (tp1, tp2, mô tả nguồn).
+    """
+    risk = abs(close - sl)
+    if risk <= 0:
+        risk = atr
+
+    usable = [t for t in targets
+              if (side == "BUY" and t > close) or (side == "SELL" and t < close)]
+    # Lọc mức cho R:R >= 1.5
+    usable_ok = [t for t in usable if abs(t - close) / risk >= 1.5]
+
+    if usable_ok:
+        tp1 = usable_ok[0]
+        tp2 = usable_ok[1] if len(usable_ok) > 1 else None
+        src = "Vùng thanh khoản (đỉnh/đáy đám đông đặt SL)"
+        return tp1, tp2, src
+
+    # Không có mức thanh khoản nào đủ xa -> nới bằng ATR
+    tp1 = close + atr * 3 if side == "BUY" else close - atr * 3
+    return tp1, None, "ATR×3 (không tìm thấy vùng thanh khoản phù hợp)"
 
 
 # ------------------------------------------------------------------- patterns
@@ -347,7 +413,9 @@ def _mk_setup(side: str, entry: float, sl: float, tp: float, reasons: List[str],
 
 
 # ------------------------------------------------------------------ analyze
-def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[Dict] = None) -> Dict:
+def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[Dict] = None,
+                   locked: Optional[Dict] = None,
+                   expiry_bars: int = st_mod.DEFAULT_EXPIRY_BARS) -> Dict:
     df = df.copy()
     close = float(df["close"].iloc[-1])
     atr = _atr(df)
@@ -382,74 +450,118 @@ def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[
 
     setups: List[Dict] = []
 
-    def make(side: str, sl: float, tp: float, source: str, reasons: List[str]):
+    # Mục tiêu thanh khoản phía trước (đỉnh/đáy đám đông đặt SL)
+    buy_targets = _liquidity_targets("BUY", close, highs, lows, atr)
+    sell_targets = _liquidity_targets("SELL", close, highs, lows, atr)
+
+    def make(side: str, sl: float, tp: float, source: str, reasons: List[str],
+             tp2: Optional[float] = None, tp_src: str = ""):
         cl, pattern = _build_checklist(
             side, close, sup_near, res_near, res_just_below, sup_just_above,
             sup_line, res_line, sup_touch, res_touch, e20, e50, rsi, patterns, atr,
             touch_recent=(sup_recent if side == "BUY" else res_recent),
         )
-        s = _mk_setup(side, close, sl, tp, reasons, source, cl)
-        if s:
-            s["pattern"] = pattern
-            setups.append(s)
+        s_ = _mk_setup(side, close, sl, tp, reasons, source, cl)
+        if s_:
+            s_["pattern"] = pattern
+            s_["tp2"] = _round(tp2, close) if tp2 else None
+            s_["tp_source"] = tp_src
+            setups.append(s_)
 
     # ---- BUY: phản ứng tại hỗ trợ ----
     if sup_near and (close - sup_near) / close <= 0.03:
         sl = sup_near - atr * 0.75
-        tp = close + max(atr * 3, (close - sl) * 2)
-        make("BUY", sl, tp, "Vùng hỗ trợ", [
+        tp1, tp2, tsrc = _pick_tp("BUY", close, sl, buy_targets, atr)
+        make("BUY", sl, tp1, "Vùng hỗ trợ", [
             f"Nằm trên hỗ trợ {_round(sup_near, close)} (cách {round((close - sup_near) / close * 100, 2)}%)",
             f"Trendline hỗ trợ bị chạm {sup_touch} lần",
             f"RSI {round(rsi, 1)} · ATR {_round(atr, close)}",
-        ])
+        ], tp2, tsrc)
 
     # ---- BUY: phá kháng rồi test lại ----
     if res_just_below and (close - res_just_below) / close <= 0.025:
         sl = min(res_just_below - atr * 0.5, close - atr * 1.2)
-        tp = close + max(atr * 3, (close - sl) * 2)
-        make("BUY", sl, tp, "Phá kháng & test lại", [
+        tp1, tp2, tsrc = _pick_tp("BUY", close, sl, buy_targets, atr)
+        make("BUY", sl, tp1, "Phá kháng & test lại", [
             f"Kháng {_round(res_just_below, close)} vừa bị phá, nay thành hỗ trợ",
             f"Giá đang test lại từ phía trên (cách {round((close - res_just_below) / close * 100, 2)}%)",
             f"RSI {round(rsi, 1)} · ATR {_round(atr, close)}",
-        ])
+        ], tp2, tsrc)
 
     # ---- BUY: thuận xu hướng EMA ----
     if e20 > e50 and close > e20:
         sl = min(close - atr * 1.5, float(df["low"].tail(10).min()))
-        tp = close + atr * 3
-        make("BUY", sl, tp, "Xu hướng tăng", [
+        tp1, tp2, tsrc = _pick_tp("BUY", close, sl, buy_targets, atr)
+        make("BUY", sl, tp1, "Xu hướng tăng", [
             "EMA20 > EMA50 (xu hướng tăng)", "Giá đóng cửa trên EMA20",
             f"RSI {round(rsi, 1)} · ATR {_round(atr, close)}",
-        ])
+        ], tp2, tsrc)
 
     # ---- SELL: phản ứng tại kháng ----
     if res_near and (res_near - close) / close <= 0.03:
         sl = res_near + atr * 0.75
-        tp = close - max(atr * 3, (sl - close) * 2)
-        make("SELL", sl, tp, "Vùng kháng", [
+        tp1, tp2, tsrc = _pick_tp("SELL", close, sl, sell_targets, atr)
+        make("SELL", sl, tp1, "Vùng kháng", [
             f"Nằm dưới kháng {_round(res_near, close)} (cách {round((res_near - close) / close * 100, 2)}%)",
             f"Trendline kháng bị chạm {res_touch} lần",
             f"RSI {round(rsi, 1)} · ATR {_round(atr, close)}",
-        ])
+        ], tp2, tsrc)
 
     # ---- SELL: thủng hỗ trợ rồi test lại ----
     if sup_just_above and (sup_just_above - close) / close <= 0.025:
         sl = max(sup_just_above + atr * 0.5, close + atr * 1.2)
-        tp = close - max(atr * 3, (sl - close) * 2)
-        make("SELL", sl, tp, "Thủng hỗ trợ & test lại", [
+        tp1, tp2, tsrc = _pick_tp("SELL", close, sl, sell_targets, atr)
+        make("SELL", sl, tp1, "Thủng hỗ trợ & test lại", [
             f"Hỗ trợ {_round(sup_just_above, close)} vừa bị thủng, nay thành kháng",
             f"Giá đang test lại từ phía dưới (cách {round((sup_just_above - close) / close * 100, 2)}%)",
             f"RSI {round(rsi, 1)} · ATR {_round(atr, close)}",
-        ])
+        ], tp2, tsrc)
 
     # ---- SELL: thuận xu hướng EMA ----
     if e20 < e50 and close < e20:
         sl = max(close + atr * 1.5, float(df["high"].tail(10).max()))
-        tp = close - atr * 3
-        make("SELL", sl, tp, "Xu hướng giảm", [
+        tp1, tp2, tsrc = _pick_tp("SELL", close, sl, sell_targets, atr)
+        make("SELL", sl, tp1, "Xu hướng giảm", [
             "EMA20 < EMA50 (xu hướng giảm)", "Giá đóng cửa dưới EMA20",
             f"RSI {round(rsi, 1)} · ATR {_round(atr, close)}",
-        ])
+        ], tp2, tsrc)
+
+    # ---- Dựng dữ liệu nến TRƯỚC để dùng cho khoá hướng ----
+    candles = [
+        {"time": int(pd.Timestamp(ts).timestamp()),
+         "open": round(float(r["open"]), 6), "high": round(float(r["high"]), 6),
+         "low": round(float(r["low"]), 6), "close": round(float(r["close"]), 6)}
+        for ts, r in df.iterrows()
+    ]
+
+    # ================================================================
+    # KHOÁ HƯỚNG (hysteresis) — chống đảo hướng mỗi lần refresh
+    # ================================================================
+    lock_info: Dict = {"locked": False}
+    blocked_counter = 0
+
+    if locked:
+        rec = st_mod.evaluate(locked, candles, interval, expiry_bars)
+        lock_info = st_mod.describe(rec)
+        if st_mod.is_locked(rec):
+            # Đang bị khoá -> ép hướng cũ, bỏ mọi tín hiệu ngược
+            locked_side = rec.get("side")
+            opposite = [x for x in setups if x["type"] != locked_side]
+            same = [x for x in setups if x["type"] == locked_side]
+            if opposite:
+                blocked_counter = len(opposite)
+                rec["blocked_signals"] = rec.get("blocked_signals", 0) + blocked_counter
+            if same:
+                same.sort(key=lambda x: x["score"], reverse=True)
+                setups = same
+            else:
+                # Không còn setup cùng hướng -> giữ hướng khoá bằng bản ghi cũ
+                setups = []
+            lock_info["blocked_now"] = blocked_counter
+            lock_info = {**lock_info, **st_mod.describe(rec)}
+        else:
+            lock_info["just_closed"] = rec.get("state")
+            lock_info["closed_event"] = rec.get("event")
 
     # ---- Chọn 1 hướng nhất quán theo điểm chất lượng ----
     buys = [s for s in setups if s["type"] == "BUY"]
@@ -462,13 +574,8 @@ def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[
     setups.sort(key=lambda x: x["score"], reverse=True)
     setups = [s for s in setups if s["rr"] >= 1.2][:3]
 
-    # ---- Nến cho chart ----
-    candles = [
-        {"time": int(pd.Timestamp(ts).timestamp()),
-         "open": round(float(r["open"]), 6), "high": round(float(r["high"]), 6),
-         "low": round(float(r["low"]), 6), "close": round(float(r["close"]), 6)}
-        for ts, r in df.iterrows()
-    ]
+    # Không còn setup nào sau khi lọc R:R -> trả về rỗng (không bịa)
+    # (giữ nguyên hành vi cũ)
 
     info = info or {}
     best = setups[0] if setups else None
@@ -499,6 +606,7 @@ def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[
         "score": best["score"] if best else 0,
         "grade": best["grade"] if best else "Không có setup",
         "direction": best["type"] if best else None,
+        "lock": lock_info,
         "candles": candles,
         "time": int(datetime.now(tz=timezone.utc).timestamp()),
     }

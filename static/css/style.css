@@ -241,3 +241,76 @@ body {
   font-size: .76rem; font-weight: 600; color: #1e40af; background: #eef2ff;
   border: 1px solid #c7d2fe; border-radius: 7px; padding: 5px 9px;
 }
+
+/* ==================== TRẠNG THÁI CHU KỲ (khoá hướng) ==================== */
+.cycle-banner {
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  font-size: .85rem;
+  line-height: 1.45;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+.cycle-banner.locked.buy {
+  background: #ecfdf5;
+  border-color: #6ee7b7;
+  border-left: 4px solid #059669;
+}
+.cycle-banner.locked.sell {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  border-left: 4px solid #dc2626;
+}
+.cycle-banner.closed.green { background:#ecfdf5; border-color:#a7f3d0; border-left:4px solid #059669; }
+.cycle-banner.closed.red   { background:#fef2f2; border-color:#fecaca; border-left:4px solid #dc2626; }
+.cycle-banner.closed.gray  { background:#f1f5f9; border-color:#cbd5e1; border-left:4px solid #64748b; }
+
+.cycle-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  font-size: .92rem;
+}
+.cycle-head .lock-icon { font-size: 1.05rem; }
+.cycle-state {
+  margin-left: auto;
+  font-size: .74rem;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, .07);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.cycle-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: .8rem;
+  color: #334155;
+}
+.cycle-body .blocked { color: #b45309; font-weight: 600; }
+.cycle-note {
+  margin-top: 8px;
+  font-size: .73rem;
+  color: #64748b;
+  font-style: italic;
+}
+
+/* TP source */
+.tp-source {
+  font-size: .75rem;
+  color: #475569;
+  background: #f1f5f9;
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-top: 8px;
+}
+
+@media (max-width: 640px) {
+  .cycle-head { font-size: .84rem; }
+  .cycle-state { margin-left: 0; }
+  .cycle-body { font-size: .76rem; }
+}
