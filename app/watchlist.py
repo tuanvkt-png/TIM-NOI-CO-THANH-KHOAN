@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 from .analyzer import analyze_symbol
 from .data_fetcher import fetch_ohlcv, get_info
 
-# Ngưỡng "setup đẹp": ≥3/5 điều kiện ĐẠT, R:R ≥ 1.5, điểm ≥ 55
+# Ngưỡng "setup đẹp": ≥3/4 điều kiện HỘI TỤ, R:R ≥ 1.5, điểm ≥ 55
 MIN_PASSED = 3
 MIN_RR = 1.5
 MIN_SCORE = 55.0

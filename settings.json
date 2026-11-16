@@ -1,0 +1,19 @@
+{
+  "favorite_symbols": [
+    "CL=F"
+  ],
+  "interval": "1h",
+  "scan_cycle": "manual",
+  "auto_scan": false,
+  "watchlist": [
+    "GC=F",
+    "BTC-USD",
+    "ETH-USD",
+    "EURUSD=X",
+    "GBPUSD=X",
+    "USDJPY=X",
+    "CL=F",
+    "^DJI",
+    "^GSPC"
+  ]
+}

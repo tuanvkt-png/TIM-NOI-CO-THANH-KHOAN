@@ -346,7 +346,7 @@ async function scanPretty() {
     if (!list.length) {
       prettyList.innerHTML =
         `<div class="empty">Không có mã nào đạt tiêu chí “setup đẹp” trong watchlist.<br>
-         (Yêu cầu: ≥3/5 điều kiện · R:R ≥ 1.5 · Điểm ≥ 55)<br><br>
+         (Yêu cầu: ≥3/4 điều kiện hội tụ · R:R ≥ 1.5 · Điểm ≥ 55)<br><br>
          Đã quét ${data.scanned} mã · ${data.interval}</div>`;
       setStatus(`Đã quét ${data.scanned} mã — chưa có setup đẹp nào`, "ok");
       return;

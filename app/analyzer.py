@@ -5,7 +5,8 @@ Sinh ra cho mỗi mã:
   • Vùng Hỗ trợ / Kháng (cluster từ swing points)
   • Trendline hỗ trợ / kháng + số lần chạm
   • Mẫu hình Đỉnh kép / Đáy kép
-  • CHECKLIST 4 điều kiện vào lệnh (từng điều kiện ĐẠT / KHÔNG ĐẠT, kèm mức giá cụ thể)
+  • CHECKLIST 4 điều kiện HỘI TỤ vào lệnh (① Phá · ② Retest · ③ Trendline 3 · ④ Mẫu hình),
+    từng điều kiện ĐẠT / KHÔNG ĐẠT kèm mức giá cụ thể
   • Setup: Entry / SL / TP / R:R
   • Điểm chất lượng 0–100 để xếp hạng "setup đẹp"
 """
@@ -81,6 +82,33 @@ def _count_touches(df: pd.DataFrame, line: Optional[Dict], tol: float = 0.004):
     return len(touches), touches
 
 
+
+def _touches_recent(df: pd.DataFrame, line: Optional[Dict], tol: float = 0.004,
+                    lookback: int = 12) -> int:
+    """Đếm số lần chạm trendline trong `lookback` nến GẦN NHẤT.
+
+    Dùng cho điều kiện ③ "Nay chạm trendline lần thứ 3": lần chạm phải ĐANG
+    diễn ra, không phải chạm từ 200 nến trước.
+    """
+    if not line:
+        return 0
+    n = len(df)
+    if n == 0:
+        return 0
+    cnt = 0
+    for ts, row in df.iloc[-lookback:].iterrows():
+        x = pd.Timestamp(ts).value
+        if x < line["x1"] or x > line["x2"] or line["x2"] == line["x1"]:
+            continue
+        y = line["y1"] + (line["y2"] - line["y1"]) * (x - line["x1"]) / (line["x2"] - line["x1"])
+        if y <= 0:
+            continue
+        price = float(row["low"]) if line["kind"] == "support" else float(row["high"])
+        if abs(price - y) / y <= tol:
+            cnt += 1
+    return cnt
+
+
 # ------------------------------------------------------------------- patterns
 def detect_patterns(highs, lows, threshold: float = 0.006) -> List[Dict]:
     patterns: List[Dict] = []
@@ -142,13 +170,17 @@ def _build_checklist(side: str, close: float, sup_below: Optional[float],
                      sup_above: Optional[float], sup_tl: Optional[Dict],
                      res_tl: Optional[Dict], sup_touch: int, res_touch: int,
                      e20: float, e50: float, rsi: float, patterns: List[Dict],
-                     atr: float) -> Tuple[List[Dict], str]:
-    """Trả về (danh sách điều kiện, tên mô hình).
+                     atr: float, touch_recent: int = 0) -> Tuple[List[Dict], str]:
+    """Trả về (danh sách 4 điều kiện HỘI TỤ, tên mô hình).
 
-    Mỗi điều kiện nêu MỘT SỰ THẬT có thể kiểm chứng được, kèm mức giá cụ thể.
-    Hỗ trợ 2 mô hình:
-      • "Phá vỡ & test lại"  – giá đã phá một vùng rồi quay lại kiểm tra
-      • "Phản ứng tại vùng"  – giá đang nằm sát vùng S/R và bị từ chối
+    Bám đúng lý thuyết "Hội tụ 4 điều kiện" của Market Maker:
+      ① Phá vùng Hỗ trợ / Kháng        (Break)
+      ② Quay về test lại vùng vừa phá  (Retest)
+      ③ Chạm Trendline lần thứ 3       (Trendline 3)
+      ④ Chuỗi mẫu hình / cấu trúc đồng thuận (Pattern 3)
+
+    Mỗi điều kiện nêu MỘT SỰ THẬT kiểm chứng được, kèm mức giá cụ thể.
+    RSI chỉ hiện trong phần diễn giải, KHÔNG còn là điều kiện riêng.
     """
     items: List[Dict] = []
 
@@ -156,16 +188,16 @@ def _build_checklist(side: str, close: float, sup_below: Optional[float],
         items.append({"ok": bool(ok), "text": text, "value": value})
 
     if side == "BUY":
-        # Ưu tiên mô hình phá vỡ & test lại nếu có kháng đã bị phá nằm ngay dưới giá
+        # ---- ①② Phá kháng & test lại (ưu tiên) hoặc test lại hỗ trợ ----
         if res_below and (close - res_below) / close <= 0.025:
             pattern = "Phá vỡ & test lại (Breakout–Retest)"
             push(True,
-                 f"Giá đã phá vùng kháng {_round(res_below, close)}",
+                 f"① Giá đã phá vùng kháng {_round(res_below, close)}",
                  f"Giá {_round(close, close)} > kháng {_round(res_below, close)}")
             push(True,
-                 f"Giá quay về test lại vùng {_round(res_below, close)} từ phía trên (kháng cũ → hỗ trợ mới)",
+                 f"② Quay về test lại vùng {_round(res_below, close)} "
+                 f"(kháng cũ → hỗ trợ mới)",
                  f"Cách {round((close - res_below) / close * 100, 2)}% (yêu cầu ≤ 2.5%)")
-            zone = res_below
             touch = sup_touch
             tl = sup_tl
             tl_name = "hỗ trợ"
@@ -174,43 +206,46 @@ def _build_checklist(side: str, close: float, sup_below: Optional[float],
             zone = sup_below
             if zone:
                 d = (close - zone) / close * 100
-                push(d <= 2.5,
-                     f"Giá nằm sát vùng hỗ trợ {_round(zone, close)}",
-                     f"Cách {round(d, 2)}% (yêu cầu ≤ 2.5%)")
                 push(close > zone * 0.999,
-                     f"Giá chưa đánh thủng hỗ trợ {_round(zone, close)}",
+                     f"① Giá chưa đánh thủng hỗ trợ {_round(zone, close)}",
                      f"Giá {_round(close, close)} > {_round(zone, close)}")
+                push(d <= 2.5,
+                     f"② Giá đang test lại vùng hỗ trợ {_round(zone, close)}",
+                     f"Cách {round(d, 2)}% (yêu cầu ≤ 2.5%)")
             else:
-                push(False, "Không tìm thấy vùng hỗ trợ bên dưới giá", "—")
-                push(False, "Không có hỗ trợ để giữ giá", "—")
+                push(False, "① Không tìm thấy vùng hỗ trợ bên dưới giá", "—")
+                push(False, "② Không có vùng để test lại", "—")
             touch = sup_touch
             tl = sup_tl
             tl_name = "hỗ trợ"
 
-        push(touch >= 2,
-             f"Trendline {tl_name} được tôn trọng ({touch} lần chạm)",
-             f"{touch} lần chạm" + (f" · từ {tl['from'][:10]}" if tl else ""))
+        # ---- ③ NAY chạm Trendline lần thứ 3 ----
+        c3_ok = touch >= 3 and touch_recent >= 1
+        push(c3_ok,
+             f"③ Nay giá chạm trendline {tl_name} lần thứ 3",
+             f"{touch} lần chạm" + (f" · từ {tl['from'][:10]}" if tl else "")
+             + f" · {touch_recent} lần trong 12 nến gần nhất"
+             + ("" if c3_ok else " (cần ≥ 3 tổng VÀ đang chạm)"))
 
-        trend_ok = e20 > e50
+        # ---- ④ Chuỗi mẫu hình tăng đã hoàn thành (Đáy kép) ----
         pat_ok = any(p["bias"] == "BUY" for p in patterns)
-        push(trend_ok or pat_ok,
-             "Đồng thuận xu hướng tăng (EMA20 > EMA50) hoặc mẫu hình Đáy kép",
-             f"EMA20 {'>' if trend_ok else '<'} EMA50"
-             + (" · có Đáy kép" if pat_ok else "")
+        trend_ok = e20 > e50
+        push(pat_ok,
+             "④ Chuỗi mẫu hình tăng đã hoàn thành (Đáy kép)",
+             ("có Đáy kép ✔" if pat_ok else "chưa có Đáy kép")
+             + f" · EMA20 {'>' if trend_ok else '<'} EMA50"
              + f" · RSI {round(rsi, 1)}")
 
-        push(rsi < 72, "RSI chưa rơi vào vùng quá mua (còn dư địa tăng)",
-             f"RSI {round(rsi, 1)} < 72")
-
     else:  # SELL
-        # Ưu tiên mô hình phá vỡ & test lại nếu có hỗ trợ đã bị thủng nằm ngay trên giá
+        # ---- ①② Thủng hỗ trợ & test lại (ưu tiên) hoặc test lại kháng ----
         if sup_above and (sup_above - close) / close <= 0.025:
             pattern = "Phá vỡ & test lại (Breakdown–Retest)"
             push(True,
-                 f"Giá đã đánh thủng vùng hỗ trợ {_round(sup_above, close)}",
+                 f"① Giá đã đánh thủng vùng hỗ trợ {_round(sup_above, close)}",
                  f"Giá {_round(close, close)} < hỗ trợ {_round(sup_above, close)}")
             push(True,
-                 f"Giá quay về test lại vùng {_round(sup_above, close)} từ phía dưới (hỗ trợ cũ → kháng mới)",
+                 f"② Quay về test lại vùng {_round(sup_above, close)} "
+                 f"(hỗ trợ cũ → kháng mới)",
                  f"Cách {round((sup_above - close) / close * 100, 2)}% (yêu cầu ≤ 2.5%)")
             touch = res_touch
             tl = res_tl
@@ -220,33 +255,35 @@ def _build_checklist(side: str, close: float, sup_below: Optional[float],
             zone = res_above
             if zone:
                 d = (zone - close) / close * 100
-                push(d <= 2.5,
-                     f"Giá nằm sát vùng kháng {_round(zone, close)}",
-                     f"Cách {round(d, 2)}% (yêu cầu ≤ 2.5%)")
                 push(close < zone * 1.001,
-                     f"Giá chưa vượt qua kháng {_round(zone, close)}",
+                     f"① Giá chưa vượt qua kháng {_round(zone, close)}",
                      f"Giá {_round(close, close)} < {_round(zone, close)}")
+                push(d <= 2.5,
+                     f"② Giá đang test lại vùng kháng {_round(zone, close)}",
+                     f"Cách {round(d, 2)}% (yêu cầu ≤ 2.5%)")
             else:
-                push(False, "Không tìm thấy vùng kháng bên trên giá", "—")
-                push(False, "Không có kháng để chặn giá", "—")
+                push(False, "① Không tìm thấy vùng kháng bên trên giá", "—")
+                push(False, "② Không có vùng để test lại", "—")
             touch = res_touch
             tl = res_tl
             tl_name = "kháng"
 
-        push(touch >= 2,
-             f"Trendline {tl_name} được tôn trọng ({touch} lần chạm)",
-             f"{touch} lần chạm" + (f" · từ {tl['from'][:10]}" if tl else ""))
+        # ---- ③ NAY chạm Trendline lần thứ 3 ----
+        c3_ok = touch >= 3 and touch_recent >= 1
+        push(c3_ok,
+             f"③ Nay giá chạm trendline {tl_name} lần thứ 3",
+             f"{touch} lần chạm" + (f" · từ {tl['from'][:10]}" if tl else "")
+             + f" · {touch_recent} lần trong 12 nến gần nhất"
+             + ("" if c3_ok else " (cần ≥ 3 tổng VÀ đang chạm)"))
 
-        trend_ok = e20 < e50
+        # ---- ④ Chuỗi mẫu hình giảm đã hoàn thành (Đỉnh kép) ----
         pat_ok = any(p["bias"] == "SELL" for p in patterns)
-        push(trend_ok or pat_ok,
-             "Đồng thuận xu hướng giảm (EMA20 < EMA50) hoặc mẫu hình Đỉnh kép",
-             f"EMA20 {'<' if trend_ok else '>'} EMA50"
-             + (" · có Đỉnh kép" if pat_ok else "")
+        trend_ok = e20 < e50
+        push(pat_ok,
+             "④ Chuỗi mẫu hình giảm đã hoàn thành (Đỉnh kép)",
+             ("có Đỉnh kép ✔" if pat_ok else "chưa có Đỉnh kép")
+             + f" · EMA20 {'<' if trend_ok else '>'} EMA50"
              + f" · RSI {round(rsi, 1)}")
-
-        push(rsi > 28, "RSI chưa rơi vào vùng quá bán (còn dư địa giảm)",
-             f"RSI {round(rsi, 1)} > 28")
 
     return items, pattern
 
@@ -324,6 +361,8 @@ def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[
     res_line = _fit_line(highs, "resistance")
     sup_touch, sup_list = _count_touches(df, sup_line)
     res_touch, res_list = _count_touches(df, res_line)
+    sup_recent = _touches_recent(df, sup_line)
+    res_recent = _touches_recent(df, res_line)
     patterns = detect_patterns(highs, lows)
 
     ema20 = df["close"].ewm(span=20, adjust=False).mean()
@@ -347,6 +386,7 @@ def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[
         cl, pattern = _build_checklist(
             side, close, sup_near, res_near, res_just_below, sup_just_above,
             sup_line, res_line, sup_touch, res_touch, e20, e50, rsi, patterns, atr,
+            touch_recent=(sup_recent if side == "BUY" else res_recent),
         )
         s = _mk_setup(side, close, sl, tp, reasons, source, cl)
         if s:
