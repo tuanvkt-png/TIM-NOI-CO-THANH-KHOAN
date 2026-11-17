@@ -54,61 +54,316 @@ def _cluster(points: List[Tuple], threshold_pct: float = 0.004) -> List[float]:
 
 
 # ------------------------------------------------------------------ trendline
-def _fit_line(points: List[Tuple], kind: str) -> Optional[Dict]:
-    if len(points) < 2:
-        return None
-    p1, p2 = points[0], points[-1]
-    try:
-        x1 = pd.Timestamp(p1[0]).value
-        x2 = pd.Timestamp(p2[0]).value
-    except Exception:
-        return None
-    if x2 <= x1:
-        return None
-    return {"kind": kind, "x1": x1, "y1": float(p1[1]), "x2": x2, "y2": float(p2[1]),
-            "from": str(p1[0]), "to": str(p2[0])}
+def _line_y(line: Dict, x: float) -> float:
+    """Giá trị y của đường tại toạ độ x."""
+    span = line["x2"] - line["x1"]
+    if span == 0:
+        return line["y1"]
+    return line["y1"] + (line["y2"] - line["y1"]) * (x - line["x1"]) / span
 
 
-def _count_touches(df: pd.DataFrame, line: Optional[Dict], tol: float = 0.004):
-    if not line:
-        return 0, []
-    touches = []
+def _count_violations(df: pd.DataFrame, line: Dict, tol: float = 0.0045) -> Tuple[int, float]:
+    """Đếm số nến BỊ ĐƯỜNG XUYÊN QUA và mức xuyên sâu nhất (%).
+
+    Đây là tiêu chí QUAN TRỌNG NHẤT: một trendline hợp lệ (hỗ trợ) không được
+    để nến đóng cửa/đáy thấp hơn nó quá nhiều. Nếu đường cắt ngang thân nến
+    thì đó không phải trendline — chỉ là đường nối 2 điểm bất kỳ.
+    """
+    viol = 0
+    worst = 0.0
+    x1, x2 = line["x1"], line["x2"]
     for ts, row in df.iterrows():
+        x = pd.Timestamp(ts).value
+        if x < x1 or x > x2:
+            continue
+        y = _line_y(line, x)
+        if y <= 0:
+            continue
+        if line["kind"] == "support":
+            price = float(row["low"])
+            breach = (y - price) / y          # dương = nến thấp hơn đường
+        else:
+            price = float(row["high"])
+            breach = (price - y) / y          # dương = nến cao hơn đường
+        if breach > tol:
+            viol += 1
+            worst = max(worst, breach * 100)
+    return viol, worst
+
+
+def _count_pivots_touched(pivots: List[Tuple], line: Dict, tol: float = 0.0045) -> int:
+    """Đếm số swing point nằm SÁT đường (dung sai tol)."""
+    n = 0
+    for ts, price in pivots:
         x = pd.Timestamp(ts).value
         if x < line["x1"] or x > line["x2"]:
             continue
-        y = line["y1"] + (line["y2"] - line["y1"]) * (x - line["x1"]) / (line["x2"] - line["x1"])
-        price = float(row["low"]) if line["kind"] == "support" else float(row["high"])
+        y = _line_y(line, x)
+        if y <= 0:
+            continue
+        if abs(price - y) / y <= tol:
+            n += 1
+    return n
+
+
+def _fit_line(points: List[Tuple], kind: str, df: Optional[pd.DataFrame] = None,
+              max_viol_pct: float = 0.10, tolerance: float = 0.0045,
+              lookback: int = 140) -> Optional[Dict]:
+    """Chọn trendline TỐT NHẤT trong mọi cặp swing point.
+
+    THUẬT TOÁN CŨ (SAI):
+        p1 = points[0]   (swing CŨ NHẤT)
+        p2 = points[-1]  (swing MỚI NHẤT)
+        -> Nối 2 điểm xa nhất, KHÔNG kiểm tra đường có cắt qua nến không.
+        Đo thực tế: có mã bị 96% số nến xuyên qua, sâu tới 25.9%.
+
+    THUẬT TOÁN MỚI:
+        1. Với MỌI cặp swing (i < j):
+           - bỏ nếu 2 điểm quá sát nhau (không thành đường)
+           - bỏ nếu dốc sai chiều (hỗ trợ dốc xuống / kháng dốc lên quá mạnh)
+        2. KÉO DÀI đường tới nến mới nhất (như trader luôn làm), rồi mới đo
+           số nến bị đường cắt xuyên TRÊN TOÀN BỘ đoạn sẽ vẽ. Đây là điểm
+           quan trọng: chấm điểm trên đoạn gốc rồi mới kéo dài sẽ chọn ra
+           đường "đẹp lúc đầu, cắt nát về sau".
+        3. Loại đường xuyên quá 25% số nến.
+        4. Chấm điểm: touch*12 − xuyên*60 − sâu*1.5 + độ_xa*10 + ưu tiên
+           đường còn sống + đường đi tới swing mới nhất.
+        5. Chọn điểm cao nhất. Gắn cờ valid/broken cho giao diện.
+    """
+    if len(points) < 2:
+        return None
+
+    arr: List[Tuple[float, float]] = []
+    for ts, price in points:
+        try:
+            arr.append((float(pd.Timestamp(ts).value), float(price)))
+        except Exception:
+            continue
+    if len(arr) < 2:
+        return None
+
+    # --- CHỈ XÉT SWING TRONG CỬA SỔ GẦN NHẤT ---
+    # Trader không vẽ trendline nối một đáy cách đây 300 nến: đường đó sẽ
+    # cắt qua toàn bộ dữ liệu phía sau. Giới hạn lookback để đường phản ánh
+    # đúng xu hướng ĐANG diễn ra.
+    if df is not None and len(df) > lookback:
+        x_min = float(pd.to_datetime(df.index).asi8[-lookback])
+        arr = [t for t in arr if t[0] >= x_min]
+        if len(arr) < 2:
+            return None
+    n_pts = len(arr)
+
+    # --- Chuẩn bị mảng nến để đếm xuyên qua NHANH (không dùng iterrows) ---
+    xs = lows = highs = None
+    x_last = None
+    if df is not None and len(df):
+        xs = pd.to_datetime(df.index).asi8.astype("float64")
+        lows = df["low"].to_numpy(dtype="float64")
+        highs = df["high"].to_numpy(dtype="float64")
+        x_last = float(xs[-1])
+        close_now = float(df["close"].iloc[-1])
+
+    def count_viol(x1, y1, x2, y2):
+        """Đếm số nến bị đường cắt xuyên + mức xuyên sâu nhất (%)."""
+        if xs is None or x2 <= x1 or y1 <= 0:
+            return 0, 0.0
+        mask = (xs >= x1) & (xs <= x2)
+        if not mask.any():
+            return 0, 0.0
+        ys = y1 + (y2 - y1) * (xs[mask] - x1) / (x2 - x1)
+        px = lows[mask] if kind == "support" else highs[mask]
+        good = ys > 0
+        if not good.any():
+            return 0, 0.0
+        breach = (ys[good] - px[good]) / ys[good] if kind == "support" \
+                 else (px[good] - ys[good]) / ys[good]
+        bad = breach > tolerance
+        n = int(bad.sum())
+        worst = float(breach[bad].max() * 100) if n else 0.0
+        return n, worst
+
+    def count_ext(x1, y1, x2, y2):
+        """Kéo dài tới nến cuối và trả (số nến tổng, số xuyên, sâu nhất)."""
+        if x_last is not None and x_last > x2:
+            y2e = y1 + (y2 - y1) * (x_last - x1) / (x2 - x1)
+            x2, y2 = x_last, y2e
+        v, w = count_viol(x1, y1, x2, y2)
+        tot = int(((xs >= x1) & (xs <= x2)).sum()) if xs is not None else 0
+        return tot, v, w
+
+    candidates: List[Dict] = []
+    for i in range(n_pts - 1):
+        for j in range(i + 1, n_pts):
+            x1, y1 = arr[i]
+            x2, y2 = arr[j]
+            if x2 <= x1:
+                continue
+            span_ratio = (j - i) / max(n_pts - 1, 1)
+            if span_ratio < 0.25:
+                continue
+
+            slope_pct = (y2 - y1) / y1 * 100 if y1 else 0
+            if kind == "support" and slope_pct < -8:
+                continue
+            if kind == "resistance" and slope_pct > 8:
+                continue
+
+            # Đo TRÊN TOÀN BỘ đoạn sẽ vẽ (đã kéo dài tới nến cuối)
+            tot, viol, worst = count_ext(x1, y1, x2, y2)
+            viol_pct = viol / tot if tot else 0.0
+            if viol_pct > max_viol_pct:
+                continue          # đường cắt nát -> không phải trendline
+
+            line = {"kind": kind, "x1": x1, "y1": y1, "x2": x2, "y2": y2}
+            touches = _count_pivots_touched(points, line, tolerance)
+
+            # --- KHOẢNG CÁCH TỚI GIÁ HIỆN TẠI ---
+            # Một trendline mà ở xa giá 20-25% thì vô dụng: nó có thể "0 nến
+            # xuyên" chỉ vì nằm tận đáy biểu đồ. Trendline hỗ trợ phải nằm
+            # DƯỚI giá một chút và CÒN GẦN giá; kháng phải nằm TRÊN.
+            dist_pct = 0.0
+            if x_last is not None and x_last > x2:
+                y_last_ = y1 + (y2 - y1) * (x_last - x1) / (x2 - x1)
+            else:
+                y_last_ = y2
+            if y_last_ > 0 and close_now > 0:
+                raw = (close_now - y_last_) / close_now * 100   # >0: đường dưới giá
+                dist_pct = raw if kind == "support" else -raw
+                # hỗ trợ nên nằm dưới giá (raw>0); kháng nên nằm trên (raw<0)
+                if dist_pct > 12 or dist_pct < -12:
+                    continue        # quá xa -> không dùng
+            else:
+                dist_pct = 99.0
+
+            # Đường cắt qua nến là lỗi NẶNG — phạt mạnh để không bao giờ
+            # thắng một đường sạch có ít chạm hơn.
+            score = touches * 12
+            score -= viol_pct * 140
+            score -= worst * 2.5
+            if viol_pct > 0.03:
+                score -= 12
+            score += span_ratio * 10
+            if j == n_pts - 1:
+                score += 6          # đường đi tới swing mới nhất
+            if touches >= 3:
+                score += 4
+            if viol_pct < 0.01:
+                score += 8          # ưu tiên đường CÒN SỐNG
+            # ưu tiên đường GẦN giá: dưới 2% là lý tưởng
+            score += max(0.0, 10 - abs(dist_pct) * 1.6)
+
+            candidates.append({
+                "kind": kind, "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                "from": str(pd.Timestamp(arr[i][0])), "to": str(pd.Timestamp(arr[j][0])),
+                "_score": score, "_touches": touches,
+                "_viol": viol, "_viol_pct": round(viol_pct * 100, 1),
+                "_worst": round(worst, 2), "_slope_pct": round(slope_pct, 2),
+                "_dist_pct": round(dist_pct, 2),
+            })
+
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda c: c["_score"])
+    if best["_score"] < 8:
+        return None
+
+    # --- Kéo dài tới nến mới nhất để vẽ ---
+    best["valid"] = True
+    best["broken"] = False
+    best["break_ts"] = None
+    if x_last is not None and x_last > best["x2"]:
+        best["y2"] = best["y1"] + (best["y2"] - best["y1"]) * \
+                     (x_last - best["x1"]) / (best["x2"] - best["x1"])
+        best["x2"] = x_last
+        best["extended"] = True
+
+    # --- Đường đã bị phá chưa (3 nến cuối đóng cửa vượt quá 1.2%) ---
+    if df is not None and len(df) >= 3:
+        for ts, row in df.iloc[-3:].iterrows():
+            x = float(pd.Timestamp(ts).value)
+            if x < best["x1"]:
+                continue
+            y = best["y1"] + (best["y2"] - best["y1"]) * (x - best["x1"]) / (best["x2"] - best["x1"])
+            if y <= 0:
+                continue
+            c = float(row["close"])
+            if best["kind"] == "support" and (y - c) / y > 0.012:
+                best["valid"], best["broken"], best["break_ts"] = False, True, str(ts)
+                break
+            if best["kind"] == "resistance" and (c - y) / y > 0.012:
+                best["valid"], best["broken"], best["break_ts"] = False, True, str(ts)
+                break
+
+    return best
+
+
+def _count_touches(df: pd.DataFrame, line: Optional[Dict], pivots: Optional[List[Tuple]] = None,
+                   tol: float = 0.0045):
+    """Đếm số lần CHẠM trendline.
+
+    QUAN TRỌNG: chỉ đếm các SWING POINT (đỉnh/đáy thật) nằm sát đường,
+    KHÔNG đếm mọi nến. Nếu đếm mọi nến thì một đường đi men theo giá sẽ
+    báo "90 lần chạm / 145 nến" — con số vô nghĩa.
+
+    Một trendline hợp lệ thường có 3–15 lần chạm (swing point).
+    """
+    if not line:
+        return 0, []
+
+    if pivots is None:
+        # fallback: dùng swing point tự tìm
+        highs, lows = _swing_points(df, 5)
+        pivots = lows if line["kind"] == "support" else highs
+
+    touches = []
+    for ts, price in pivots:
+        x = pd.Timestamp(ts).value
+        if x < line["x1"] or x > line["x2"]:
+            continue
+        y = _line_y(line, x)
         if y <= 0:
             continue
         if abs(price - y) / y <= tol:
             touches.append({"ts": str(ts), "price": round(price, 5), "line": round(y, 5)})
+
+    touches.sort(key=lambda t: t["ts"])
     return len(touches), touches
 
 
-
-def _touches_recent(df: pd.DataFrame, line: Optional[Dict], tol: float = 0.004,
+def _touches_recent(df: pd.DataFrame, line: Optional[Dict], tol: float = 0.006,
                     lookback: int = 12) -> int:
-    """Đếm số lần chạm trendline trong `lookback` nến GẦN NHẤT.
+    """Đếm số nến GẦN NHẤT mà giá ĐANG chạm trendline.
 
     Dùng cho điều kiện ③ "Nay chạm trendline lần thứ 3": lần chạm phải ĐANG
     diễn ra, không phải chạm từ 200 nến trước.
+
+    Lưu ý: dùng dung sai RỘNG HƠN (0.6%) so với lúc vẽ (0.45%), và tính cả
+    trường hợp giá đang nằm giữa đường (body chạm), không chỉ râu.
     """
     if not line:
         return 0
-    n = len(df)
-    if n == 0:
+    if len(df) == 0:
         return 0
     cnt = 0
     for ts, row in df.iloc[-lookback:].iterrows():
         x = pd.Timestamp(ts).value
-        if x < line["x1"] or x > line["x2"] or line["x2"] == line["x1"]:
+        if x < line["x1"] or x > line["x2"]:
             continue
-        y = line["y1"] + (line["y2"] - line["y1"]) * (x - line["x1"]) / (line["x2"] - line["x1"])
+        y = _line_y(line, x)
         if y <= 0:
             continue
-        price = float(row["low"]) if line["kind"] == "support" else float(row["high"])
-        if abs(price - y) / y <= tol:
+        if line["kind"] == "support":
+            # chạm nếu râu dưới hoặc giá đóng cửa tới sát đường
+            d = min(abs(float(row["low"]) - y), abs(float(row["close"]) - y))
+            # giá đã ĐÓNG CỬA dưới đường quá xa -> trendline bị phá, không tính
+            if (y - float(row["close"])) / y > 0.012:
+                continue
+        else:
+            d = min(abs(float(row["high"]) - y), abs(float(row["close"]) - y))
+            if (float(row["close"]) - y) / y > 0.012:
+                continue
+        if d / y <= tol:
             cnt += 1
     return cnt
 
@@ -281,7 +536,8 @@ def _build_checklist(side: str, close: float, sup_below: Optional[float],
                      sup_above: Optional[float], sup_tl: Optional[Dict],
                      res_tl: Optional[Dict], sup_touch: int, res_touch: int,
                      e20: float, e50: float, rsi: float, patterns: List[Dict],
-                     atr: float, touch_recent: int = 0) -> Tuple[List[Dict], str]:
+                     atr: float, touch_recent: int = 0,
+                     tl_valid: bool = True, tl_broken: bool = False) -> Tuple[List[Dict], str]:
     """Trả về (danh sách 4 điều kiện HỘI TỤ, tên mô hình).
 
     Bám đúng lý thuyết "Hội tụ 4 điều kiện" của Market Maker:
@@ -331,12 +587,19 @@ def _build_checklist(side: str, close: float, sup_below: Optional[float],
             tl_name = "hỗ trợ"
 
         # ---- ③ NAY chạm Trendline lần thứ 3 ----
-        c3_ok = touch >= 3 and touch_recent >= 1
+        c3_ok = touch >= 3 and touch_recent >= 1 and tl_valid and not tl_broken
+        if tl_broken:
+            c3_note = " · ⚠ trendline đã bị phá — không dùng làm điểm tựa"
+        elif not tl_valid:
+            c3_note = " · ⚠ trendline chưa xác nhận"
+        elif c3_ok:
+            c3_note = ""
+        else:
+            c3_note = " (cần ≥ 3 tổng VÀ đang chạm)"
         push(c3_ok,
              f"③ Nay giá chạm trendline {tl_name} lần thứ 3",
              f"{touch} lần chạm" + (f" · từ {tl['from'][:10]}" if tl else "")
-             + f" · {touch_recent} lần trong 12 nến gần nhất"
-             + ("" if c3_ok else " (cần ≥ 3 tổng VÀ đang chạm)"))
+             + f" · {touch_recent} lần trong 12 nến gần nhất" + c3_note)
 
         # ---- ④ Chuỗi mẫu hình tăng đã hoàn thành (Đáy kép) ----
         pat_ok = any(p["bias"] == "BUY" for p in patterns)
@@ -380,12 +643,19 @@ def _build_checklist(side: str, close: float, sup_below: Optional[float],
             tl_name = "kháng"
 
         # ---- ③ NAY chạm Trendline lần thứ 3 ----
-        c3_ok = touch >= 3 and touch_recent >= 1
+        c3_ok = touch >= 3 and touch_recent >= 1 and tl_valid and not tl_broken
+        if tl_broken:
+            c3_note = " · ⚠ trendline đã bị phá — không dùng làm điểm tựa"
+        elif not tl_valid:
+            c3_note = " · ⚠ trendline chưa xác nhận"
+        elif c3_ok:
+            c3_note = ""
+        else:
+            c3_note = " (cần ≥ 3 tổng VÀ đang chạm)"
         push(c3_ok,
              f"③ Nay giá chạm trendline {tl_name} lần thứ 3",
              f"{touch} lần chạm" + (f" · từ {tl['from'][:10]}" if tl else "")
-             + f" · {touch_recent} lần trong 12 nến gần nhất"
-             + ("" if c3_ok else " (cần ≥ 3 tổng VÀ đang chạm)"))
+             + f" · {touch_recent} lần trong 12 nến gần nhất" + c3_note)
 
         # ---- ④ Chuỗi mẫu hình giảm đã hoàn thành (Đỉnh kép) ----
         pat_ok = any(p["bias"] == "SELL" for p in patterns)
@@ -472,10 +742,12 @@ def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[
     resistances = _cluster(highs)
     supports = _cluster(lows)
 
-    sup_line = _fit_line(lows, "support")
-    res_line = _fit_line(highs, "resistance")
-    sup_touch, sup_list = _count_touches(df, sup_line)
-    res_touch, res_list = _count_touches(df, res_line)
+    # BẮT BUỘC truyền df= để _fit_line lọc được các đường cắt xuyên nến.
+    # (Bug cũ: gọi thiếu df -> không kiểm tra xuyên nến -> đường vô lý)
+    sup_line = _fit_line(lows, "support", df=df)
+    res_line = _fit_line(highs, "resistance", df=df)
+    sup_touch, sup_list = _count_touches(df, sup_line, pivots=lows)
+    res_touch, res_list = _count_touches(df, res_line, pivots=highs)
     sup_recent = _touches_recent(df, sup_line)
     res_recent = _touches_recent(df, res_line)
     patterns = detect_patterns(highs, lows)
@@ -504,10 +776,13 @@ def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[
     def make(side: str, sl: float, tp: float, source: str, reasons: List[str],
              tp2: Optional[float] = None, tp_src: str = "",
              sweep_lvl: Optional[float] = None):
+        tl_cur = sup_line if side == "BUY" else res_line
         cl, pattern = _build_checklist(
             side, close, sup_near, res_near, res_just_below, sup_just_above,
             sup_line, res_line, sup_touch, res_touch, e20, e50, rsi, patterns, atr,
             touch_recent=(sup_recent if side == "BUY" else res_recent),
+            tl_valid=(tl_cur or {}).get("valid", True) if tl_cur else False,
+            tl_broken=(tl_cur or {}).get("broken", False) if tl_cur else True,
         )
         s_ = _mk_setup(side, close, sl, tp, reasons, source, cl)
         if s_:
@@ -733,4 +1008,8 @@ def _serialize_line(line: Optional[Dict]) -> Optional[Dict]:
         "x2_ts": int(pd.Timestamp(x_end).timestamp()),
         "y_end": _round(y_end, y1),
         "slope_pct": round((y_end - y1) / max(abs(y1), 1e-9) * 100, 2),
+        "valid": bool(line.get("valid", True)),
+        "broken": bool(line.get("broken", False)),
+        "touches_scanned": line.get("_touches"),
+        "violations": line.get("_viol"),
     }

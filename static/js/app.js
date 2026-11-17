@@ -99,13 +99,21 @@ function addLine(price, color, style, title, width) {
   } catch (e) { console.warn("priceLine lỗi", price, e); }
 }
 
+// Vẽ trendline lên chart.
+// - solid  = đường còn hiệu lực
+// - dashed = đường đã bị giá phá (vẫn vẽ để tham khảo, nhưng mờ hơn)
 function addTrendline(line, color, title) {
   if (!line || !line.x1_ts) return;
+  const broken = !!line.broken;
   try {
     const s = state.chart.addLineSeries({
-      color, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
-      priceLineVisible: false, lastValueVisible: false,
-      crosshairMarkerVisible: false, title,
+      color: broken ? color + "80" : color,
+      lineWidth: broken ? 1 : 2,
+      lineStyle: broken ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+      title: broken ? `${title} — đã bị phá` : title,
     });
     s.setData([
       { time: line.x1_ts, value: Number(line.y1) },
@@ -164,9 +172,11 @@ function drawChart(data) {
   (data.supports || []).forEach((p) => addLine(p, "#16a34a", dashed, "Hỗ trợ"));
   (data.resistances || []).forEach((p) => addLine(p, "#dc2626", dashed, "Kháng"));
   if (data.support_trendline)
-    addTrendline(data.support_trendline, "#2563eb", `Trendline hỗ trợ (${data.support_touches} lần chạm)`);
+    addTrendline(data.support_trendline, "#2563eb",
+      `Trendline hỗ trợ (${data.support_touches} lần chạm${data.support_trendline.broken ? " · ĐÃ PHÁ" : ""})`);
   if (data.resistance_trendline)
-    addTrendline(data.resistance_trendline, "#f97316", `Trendline kháng (${data.resistance_touches} lần chạm)`);
+    addTrendline(data.resistance_trendline, "#f97316",
+      `Trendline kháng (${data.resistance_touches} lần chạm${data.resistance_trendline.broken ? " · ĐÃ PHÁ" : ""})`);
 
   (data.setups || []).forEach((s) => {
     addLine(s.entry, "#2563eb", solid, `Entry ${s.type}`, 2);
@@ -192,6 +202,38 @@ function renderBadge(data) {
     <span class="badge-ticker">Yahoo: ${data.ticker || data.symbol}</span>
     <span class="badge-unit">Đơn vị: ${data.unit || "—"}</span>
   `;
+}
+
+/* ======================================================== trendline info */
+// Khối cho trader thấy NGAY web vẽ trendline thế nào: nối đỉnh/đáy nào,
+// bao nhiêu lần chạm, có bị giá phá chưa. Đây là phần minh bạch để đối
+// chiếu với MetaTrader — nếu thấy khác thì trader biết mà bỏ qua setup.
+function trendlineHTML(data) {
+  const sup = data.support_trendline, res = data.resistance_trendline;
+  if (!sup && !res) return "";
+  const row = (L, name, cls) => {
+    if (!L) return "";
+    const broken = !!L.broken;
+    const n = L.kind === "support" ? data.support_touches : data.resistance_touches;
+    const from = (L.from || "").slice(0, 10);
+    const slope = Number(L.slope_pct || 0);
+    const dir = slope > 0.5 ? "dốc lên" : slope < -0.5 ? "dốc xuống" : "đi ngang";
+    const tag = broken
+      ? `<span class="tl-broken">⚠ ĐÃ BỊ PHÁ</span>`
+      : `<span class="tl-live">✔ Còn hiệu lực</span>`;
+    return `<div class="tl-row ${cls}">
+      <span class="tl-name">${name}</span>
+      ${tag}
+      <span class="tl-detail">${n} lần chạm · ${dir} (${slope > 0 ? "+" : ""}${slope.toFixed(1)}%) · từ ${from}</span>
+    </div>`;
+  };
+  return `<div class="step-block tl-block">
+    <div class="step-head"><span class="step-num">📏</span>
+      <span class="step-title">Trendline đã vẽ (đối chiếu MetaTrader)</span></div>
+    ${row(sup, "Hỗ trợ", "sup")}
+    ${row(res, "Kháng", "res")}
+    <div class="step-note">Đường chỉ được vẽ khi nối các đỉnh/đáy CÙNG PHÍA và không cắt xuyên thân nến. Đường nét đứt = đã bị giá phá.</div>
+  </div>`;
 }
 
 /* =========================================================== checklist */
