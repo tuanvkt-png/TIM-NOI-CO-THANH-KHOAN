@@ -54,6 +54,42 @@ async def api_symbols():
             "intervals": {k: v.get("label", k) for k, v in INTERVALS.items()}}
 
 
+
+# Các khung dùng cho phân tích đa khung (Bước 1) và CHoCH (Bước 5)
+MTF_TFS = ["1d", "4h"]
+
+
+def _gather_frames(symbol: str, interval: str) -> tuple:
+    """Lấy dữ liệu đa khung cho Bước 1 và khung nhỏ hơn cho CHoCH (Bước 5).
+
+    Trả về (tf_frames, df_lower). Lỗi ở khung nào thì bỏ qua khung đó,
+    KHÔNG làm hỏng phân tích chính.
+    """
+    tf_frames = {}
+    for tf in MTF_TFS:
+        if tf == interval:
+            continue
+        try:
+            d = fetch_ohlcv(symbol, interval=tf)
+            if d is not None and not d.empty:
+                tf_frames[tf] = d
+        except Exception:
+            pass
+
+    df_lower = None
+    lower_map = {"1h": "15m", "4h": "1h", "1d": "4h", "1wk": "1d"}
+    low_tf = lower_map.get(interval)
+    if low_tf and low_tf in INTERVALS:
+        try:
+            d = fetch_ohlcv(symbol, interval=low_tf)
+            if d is not None and not d.empty:
+                df_lower = d
+        except Exception:
+            pass
+
+    return tf_frames, df_lower
+
+
 @app.get("/api/scan")
 async def api_scan(symbol: str = Query(...), interval: str = Query("1h"),
                    reset: bool = Query(False)):
@@ -80,7 +116,9 @@ async def api_scan(symbol: str = Query(...), interval: str = Query("1h"),
         st_mod.save_state(state)
 
     locked = state.get(key)
-    result = analyze_symbol(df, symbol, interval, get_info(symbol), locked=locked)
+    tf_frames, df_lower = _gather_frames(symbol, interval)
+    result = analyze_symbol(df, symbol, interval, get_info(symbol), locked=locked,
+                            tf_frames=tf_frames, df_lower=df_lower)
 
     # Cập nhật / tạo mới bản ghi trạng thái
     candles = result.get("candles") or []

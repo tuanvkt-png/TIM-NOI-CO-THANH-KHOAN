@@ -225,21 +225,94 @@ function setupCardHTML(s) {
       <table class="setup-table">
         <tr><td>Entry</td><td class="mono">${fmt(s.entry)}</td></tr>
         <tr><td>Stop Loss</td><td class="mono red">${fmt(s.sl)}</td></tr>
-        <tr><td>Take Profit 1</td><td class="mono green">${fmt(s.tp)}</td></tr>
-        ${s.tp2 ? `<tr><td>Take Profit 2</td><td class="mono green">${fmt(s.tp2)}</td></tr>` : ""}
-        <tr><td>R:R</td><td class="mono"><strong>1 : ${s.rr}</strong></td></tr>
+        <tr><td>Take Profit</td><td class="mono green">${fmt(s.tp)}</td></tr>
+        <tr><td>R:R</td><td class="mono"><strong>1 : ${s.rr}</strong> ${s.rr_ok ? '<span class="rr-ok">✔ ≥1:2</span>' : '<span class="rr-bad">✘ &lt;1:2</span>'}</td></tr>
       </table>
-      ${s.tp_source ? `<div class="tp-source">🎯 ${s.tp_source}</div>` : ""}
-      <div class="ck-title">✅ Checklist điều kiện vào lệnh</div>
+      <div class="ck-title">✅ <span class="step-num">4</span> Hội tụ 4 điều kiện <span class="step-note-inline">(B1 đa khung · B2 phá/retest · B3 trendline · B4 mẫu hình)</span></div>
       ${checklistHTML(s)}
       <ul class="reasons">${(s.reasons || []).map((r) => `<li>${r}</li>`).join("")}</ul>
     </div>`;
 }
 
+
+/* ============ BƯỚC 1 — XU HƯỚNG ĐA KHUNG ============ */
+function mtfHTML(data) {
+  const m = data.mtf;
+  if (!m || !m.available) return "";
+  const chip = (t) => t === "TANG" ? "up" : t === "GIAM" ? "down" : "flat";
+  const label = (t) => t === "TANG" ? "TĂNG" : t === "GIAM" ? "GIẢM" : "NGANG";
+  const rows = (m.frames || []).map((f) => `
+    <div class="mtf-row">
+      <span class="mtf-tf">${(f.tf||"").toUpperCase()}</span>
+      <span class="mtf-trend ${chip(f.trend)}">${label(f.trend)}</span>
+      <span class="mtf-bar"><i style="width:${f.strength}%"></i></span>
+      <span class="mtf-strength">${f.strength}/100</span>
+    </div>`).join("");
+  const ck = data.mtf_check || {};
+  const cls = ck.status === "THUAN" ? "ok" : ck.status === "NGUOC" ? "bad" : "warn";
+  return `
+    <div class="step-block">
+      <div class="step-head"><span class="step-num">1</span> Xu hướng đa khung (1D → 4H → 1H)</div>
+      <div class="mtf-grid">${rows}</div>
+      <div class="step-note ${cls}">${m.note || ""}</div>
+      ${ck.note ? `<div class="step-note ${cls}"><b>${ck.status}</b> — ${ck.note}</div>` : ""}
+    </div>`;
+}
+
+/* ============ BƯỚC 5 — ORDER FLOW ============ */
+function orderflowHTML(data) {
+  const lst = data.setups || [];
+  const of = lst[0] && lst[0].orderflow;
+  if (!of) return "";
+  const v = of.volume || {};
+  const kj = of.kijun || {};
+  const ch = of.choch || {};
+  let volLine = "";
+  if (v.available) {
+    const cls = v.is_climax ? "bad" : v.is_spike ? "warn" : v.is_dry ? "warn" : "ok";
+    volLine = `<div class="of-line ${cls}"><b>Volume</b> ${v.ratio}× trung bình
+        ${v.is_climax ? "· 🔥 CỰC ĐẠI" : v.is_spike ? "· ⚡ ĐỘT BIẾN" : v.is_dry ? "· 💤 CẠN" : ""}</div>`;
+    (v.signals || []).forEach((x) => {
+      volLine += `<div class="of-line sig"><b>${x.label}</b><br><small>${x.detail}</small></div>`;
+    });
+  } else {
+    volLine = `<div class="of-line warn"><b>Volume</b> — ${v.reason || "không có dữ liệu"}</div>`;
+  }
+  const kjLine = kj.available ? `<div class="of-line ${kj.aligns ? "ok" : "bad"}"><b>Kijun</b> ${kj.detail}</div>` : "";
+  const chLine = `<div class="of-line ${ch.bias ? "ok" : "warn"}"><b>CHoCH</b> ${ch.detail || "—"}</div>`;
+  return `
+    <div class="step-block">
+      <div class="step-head"><span class="step-num">5</span> Thanh khoản &amp; Order Flow</div>
+      ${volLine}${kjLine}${chLine}
+      <div class="step-note ${of.confirmed ? "ok" : "warn"}">
+        ${of.verdict} <span class="of-bonus">(điểm ${of.score_bonus > 0 ? "+" : ""}${of.score_bonus})</span>
+      </div>
+    </div>`;
+}
+
+/* ============ BƯỚC 6 — VỊ TRÍ MM ============ */
+function mmPosHTML(data) {
+  const lst = data.setups || [];
+  const pos = lst[0] && lst[0].mm_position;
+  if (!pos) return "";
+  const cls = pos.confidence === "CAO" ? "ok" : pos.confidence === "TRUNG_BINH" ? "warn" : "bad";
+  const notes = (pos.notes || []).map((n) => `<li>${n}</li>`).join("");
+  return `
+    <div class="step-block">
+      <div class="step-head"><span class="step-num">6</span> Vị trí của Market Maker</div>
+      <div class="mm-verdict ${cls}">${pos.verdict}</div>
+      <div class="mm-sides">
+        <span class="side-chip crowd">👥 Đám đông: <b>${pos.crowd_side || "?"}</b></span>
+        <span class="side-chip mm">🏦 MM: <b>${pos.mm_side || "chưa rõ"}</b></span>
+        <span class="side-chip conf">Tin cậy: <b>${pos.confidence}</b></span>
+      </div>
+      ${notes ? `<ul class="mm-notes">${notes}</ul>` : ""}
+    </div>`;
+}
+
+/* ============ TRẠNG THÁI CHU KỲ ============ */
 function cycleBannerHTML(data) {
   const L = data.lock || {};
-  if (!L.locked && !L.state) return "";
-
   if (L.locked) {
     const cls = L.side === "BUY" ? "buy" : "sell";
     const blocked = L.blocked_signals || 0;
@@ -251,23 +324,20 @@ function cycleBannerHTML(data) {
           <span class="cycle-state">${L.state_label || ""}</span>
         </div>
         <div class="cycle-body">
-          <span>Mở lúc <b>${L.opened_at ? L.opened_at.replace("T", " ").slice(0, 16) : "—"}</b>
+          <span>Mở lúc <b>${L.opened_at ? String(L.opened_at).replace("T"," ").slice(0,16) : "—"}</b>
             · đã qua <b>${L.bars_alive || 0}</b> nến</span>
           <span>Entry <b>${fmt(L.entry)}</b> · SL <b class="red">${fmt(L.sl)}</b>
             · TP1 <b class="green">${fmt(L.tp1)}</b></span>
           ${blocked > 0 ? `<span class="blocked">⛔ Đã bỏ qua <b>${blocked}</b> tín hiệu ngược chiều</span>` : ""}
         </div>
-        <div class="cycle-note">
-          Web KHÔNG lật hướng cho tới khi thủng SL, chạm TP1, hoặc hết hạn.
-        </div>
+        <div class="cycle-note">Web KHÔNG lật hướng cho tới khi thủng SL, chạm TP1, hoặc hết hạn.</div>
       </div>`;
   }
-
   if (L.just_closed) {
     const map = {
       DA_CHAM_TP: ["✅", "Chu kỳ trước đã CHẠM MỤC TIÊU", "green"],
-      THUNG_SL: ["❌", "Chu kỳ trước đã THỦNG SL", "red"],
-      HET_HAN: ["⌛", "Chu kỳ trước HẾT HẠN", "gray"],
+      THUNG_SL:   ["❌", "Chu kỳ trước đã THỦNG SL", "red"],
+      HET_HAN:    ["⌛", "Chu kỳ trước HẾT HẠN", "gray"],
     };
     const m = map[L.just_closed] || ["•", "Chu kỳ trước đã đóng", "gray"];
     return `
@@ -288,8 +358,15 @@ function renderSetups(data) {
   if (banner) {
     const b = document.createElement("div");
     b.innerHTML = banner;
-    setupsList.appendChild(b.firstElementChild);
+    if (b.firstElementChild) setupsList.appendChild(b.firstElementChild);
   }
+
+  [mtfHTML(data), orderflowHTML(data), mmPosHTML(data)].forEach((html) => {
+    if (!html) return;
+    const d = document.createElement("div");
+    d.innerHTML = html;
+    if (d.firstElementChild) setupsList.appendChild(d.firstElementChild);
+  });
 
   if (!setups.length) {
     setupsList.innerHTML =

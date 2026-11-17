@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 
 from . import setup_state as st_mod
+from . import orderflow as of_mod
+from . import multi_tf as mtf_mod
 
 
 # ------------------------------------------------------------ swing & cluster
@@ -173,6 +175,49 @@ def _pick_tp(side: str, close: float, sl: float, targets: List[float],
     # Không có mức thanh khoản nào đủ xa -> nới bằng ATR
     tp1 = close + atr * 3 if side == "BUY" else close - atr * 3
     return tp1, None, "ATR×3 (không tìm thấy vùng thanh khoản phù hợp)"
+
+
+
+# ------------------------------------------------------- stop sau râu quét
+def _stop_after_sweep(side: str, df: pd.DataFrame, atr: float,
+                      struct_level: Optional[float], lookback: int = 12) -> Dict:
+    """BƯỚC 7 — Đặt SL SAU RÂU QUÉT (không phải trước vùng S/R).
+
+    Tài liệu: "đặt Stop-Loss sau vùng râu quét".
+
+    Ý nghĩa: MM thường chọc râu qua đỉnh/đáy để quét SL đám đông rồi mới đảo
+    chiều. Nếu đặt SL ngay trên đỉnh (BUY) hoặc dưới đáy (SELL) thì bị quét.
+    Vì vậy SL phải nằm NGOÀI cực trị gần nhất + một khoảng đệm ATR.
+
+    Trả về {sl, sweep_high, sweep_low, buffer, note}
+    """
+    if df is None or len(df) < 3:
+        ref = struct_level or 0
+        return {"sl": ref, "buffer": 0, "note": "Không đủ dữ liệu"}
+
+    seg = df.tail(lookback)
+    hi = float(seg["high"].max())
+    lo = float(seg["low"].min())
+    buf = atr * 0.6          # đệm sau râu quét
+
+    if side == "BUY":
+        # SL dưới ĐÁY thấp nhất của lookback (nơi râu quét hay chọc xuống)
+        base = lo
+        if struct_level and struct_level < base:
+            base = float(struct_level)
+        sl = base - buf
+        return {"sl": sl, "sweep_low": round(lo, 6), "buffer": round(buf, 6),
+                "note": (f"SL đặt dưới đáy {round(lo, 6)} một khoảng đệm "
+                         f"{round(buf, 6)} (0.6·ATR) — sau vùng râu quét.")}
+    else:
+        # SL trên ĐỈNH cao nhất của lookback
+        base = hi
+        if struct_level and struct_level > base:
+            base = float(struct_level)
+        sl = base + buf
+        return {"sl": sl, "sweep_high": round(hi, 6), "buffer": round(buf, 6),
+                "note": (f"SL đặt trên đỉnh {round(hi, 6)} một khoảng đệm "
+                         f"{round(buf, 6)} (0.6·ATR) — sau vùng râu quét.")}
 
 
 # ------------------------------------------------------------------- patterns
@@ -415,7 +460,9 @@ def _mk_setup(side: str, entry: float, sl: float, tp: float, reasons: List[str],
 # ------------------------------------------------------------------ analyze
 def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[Dict] = None,
                    locked: Optional[Dict] = None,
-                   expiry_bars: int = st_mod.DEFAULT_EXPIRY_BARS) -> Dict:
+                   expiry_bars: int = st_mod.DEFAULT_EXPIRY_BARS,
+                   tf_frames: Optional[Dict[str, pd.DataFrame]] = None,
+                   df_lower: Optional[pd.DataFrame] = None) -> Dict:
     df = df.copy()
     close = float(df["close"].iloc[-1])
     atr = _atr(df)
@@ -455,7 +502,8 @@ def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[
     sell_targets = _liquidity_targets("SELL", close, highs, lows, atr)
 
     def make(side: str, sl: float, tp: float, source: str, reasons: List[str],
-             tp2: Optional[float] = None, tp_src: str = ""):
+             tp2: Optional[float] = None, tp_src: str = "",
+             sweep_lvl: Optional[float] = None):
         cl, pattern = _build_checklist(
             side, close, sup_near, res_near, res_just_below, sup_just_above,
             sup_line, res_line, sup_touch, res_touch, e20, e50, rsi, patterns, atr,
@@ -466,65 +514,78 @@ def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[
             s_["pattern"] = pattern
             s_["tp2"] = _round(tp2, close) if tp2 else None
             s_["tp_source"] = tp_src
+            s_["sweep_level"] = _round(sweep_lvl, close) if sweep_lvl else None
             setups.append(s_)
 
     # ---- BUY: phản ứng tại hỗ trợ ----
     if sup_near and (close - sup_near) / close <= 0.03:
-        sl = sup_near - atr * 0.75
+        sw = _stop_after_sweep("BUY", df, atr, sup_near)
+        sl = sw["sl"]
         tp1, tp2, tsrc = _pick_tp("BUY", close, sl, buy_targets, atr)
         make("BUY", sl, tp1, "Vùng hỗ trợ", [
             f"Nằm trên hỗ trợ {_round(sup_near, close)} (cách {round((close - sup_near) / close * 100, 2)}%)",
             f"Trendline hỗ trợ bị chạm {sup_touch} lần",
+            sw["note"],
             f"RSI {round(rsi, 1)} · ATR {_round(atr, close)}",
-        ], tp2, tsrc)
+        ], tp2, tsrc, sweep_lvl=sw.get("sweep_low"))
 
     # ---- BUY: phá kháng rồi test lại ----
     if res_just_below and (close - res_just_below) / close <= 0.025:
-        sl = min(res_just_below - atr * 0.5, close - atr * 1.2)
+        sw = _stop_after_sweep("BUY", df, atr, res_just_below)
+        sl = sw["sl"]
         tp1, tp2, tsrc = _pick_tp("BUY", close, sl, buy_targets, atr)
         make("BUY", sl, tp1, "Phá kháng & test lại", [
             f"Kháng {_round(res_just_below, close)} vừa bị phá, nay thành hỗ trợ",
             f"Giá đang test lại từ phía trên (cách {round((close - res_just_below) / close * 100, 2)}%)",
+            sw["note"],
             f"RSI {round(rsi, 1)} · ATR {_round(atr, close)}",
-        ], tp2, tsrc)
+        ], tp2, tsrc, sweep_lvl=sw.get("sweep_low"))
 
     # ---- BUY: thuận xu hướng EMA ----
     if e20 > e50 and close > e20:
-        sl = min(close - atr * 1.5, float(df["low"].tail(10).min()))
+        sw = _stop_after_sweep("BUY", df, atr, None)
+        sl = sw["sl"]
         tp1, tp2, tsrc = _pick_tp("BUY", close, sl, buy_targets, atr)
         make("BUY", sl, tp1, "Xu hướng tăng", [
             "EMA20 > EMA50 (xu hướng tăng)", "Giá đóng cửa trên EMA20",
+            sw["note"],
             f"RSI {round(rsi, 1)} · ATR {_round(atr, close)}",
-        ], tp2, tsrc)
+        ], tp2, tsrc, sweep_lvl=sw.get("sweep_low"))
 
     # ---- SELL: phản ứng tại kháng ----
     if res_near and (res_near - close) / close <= 0.03:
-        sl = res_near + atr * 0.75
+        sw = _stop_after_sweep("SELL", df, atr, res_near)
+        sl = sw["sl"]
         tp1, tp2, tsrc = _pick_tp("SELL", close, sl, sell_targets, atr)
         make("SELL", sl, tp1, "Vùng kháng", [
             f"Nằm dưới kháng {_round(res_near, close)} (cách {round((res_near - close) / close * 100, 2)}%)",
             f"Trendline kháng bị chạm {res_touch} lần",
+            sw["note"],
             f"RSI {round(rsi, 1)} · ATR {_round(atr, close)}",
-        ], tp2, tsrc)
+        ], tp2, tsrc, sweep_lvl=sw.get("sweep_high"))
 
     # ---- SELL: thủng hỗ trợ rồi test lại ----
     if sup_just_above and (sup_just_above - close) / close <= 0.025:
-        sl = max(sup_just_above + atr * 0.5, close + atr * 1.2)
+        sw = _stop_after_sweep("SELL", df, atr, sup_just_above)
+        sl = sw["sl"]
         tp1, tp2, tsrc = _pick_tp("SELL", close, sl, sell_targets, atr)
         make("SELL", sl, tp1, "Thủng hỗ trợ & test lại", [
             f"Hỗ trợ {_round(sup_just_above, close)} vừa bị thủng, nay thành kháng",
             f"Giá đang test lại từ phía dưới (cách {round((sup_just_above - close) / close * 100, 2)}%)",
+            sw["note"],
             f"RSI {round(rsi, 1)} · ATR {_round(atr, close)}",
-        ], tp2, tsrc)
+        ], tp2, tsrc, sweep_lvl=sw.get("sweep_high"))
 
     # ---- SELL: thuận xu hướng EMA ----
     if e20 < e50 and close < e20:
-        sl = max(close + atr * 1.5, float(df["high"].tail(10).max()))
+        sw = _stop_after_sweep("SELL", df, atr, None)
+        sl = sw["sl"]
         tp1, tp2, tsrc = _pick_tp("SELL", close, sl, sell_targets, atr)
         make("SELL", sl, tp1, "Xu hướng giảm", [
             "EMA20 < EMA50 (xu hướng giảm)", "Giá đóng cửa dưới EMA20",
+            sw["note"],
             f"RSI {round(rsi, 1)} · ATR {_round(atr, close)}",
-        ], tp2, tsrc)
+        ], tp2, tsrc, sweep_lvl=sw.get("sweep_high"))
 
     # ---- Dựng dữ liệu nến TRƯỚC để dùng cho khoá hướng ----
     candles = [
@@ -533,6 +594,11 @@ def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[
          "low": round(float(r["low"]), 6), "close": round(float(r["close"]), 6)}
         for ts, r in df.iterrows()
     ]
+
+    # ================================================================
+    # BƯỚC 1 — XU HƯỚNG ĐA KHUNG (1D → 4H → 1H)
+    # ================================================================
+    mtf = mtf_mod.combine(tf_frames or {})
 
     # ================================================================
     # KHOÁ HƯỚNG (hysteresis) — chống đảo hướng mỗi lần refresh
@@ -574,6 +640,45 @@ def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[
     setups.sort(key=lambda x: x["score"], reverse=True)
     setups = [s for s in setups if s["rr"] >= 1.2][:3]
 
+    # ================================================================
+    # BƯỚC 5 + 6 — ORDER FLOW & VỊ TRÍ MM (áp cho setup cuối cùng)
+    # ================================================================
+    of_report: Dict = {}
+    mtf_check: Dict = {}
+    if setups:
+        st0 = setups[0]
+        side0 = st0["type"]
+        lvl = st0.get("sweep_level")
+        of_report = of_mod.orderflow_report(df, df_lower, side0, lvl, atr)
+        st0["orderflow"] = of_report
+        st0["mm_position"] = of_report.get("position")
+
+        # Điều chỉnh điểm theo dòng tiền (Bước 5)
+        adj = st0["score"] + of_report.get("score_bonus", 0)
+        st0["score"] = round(max(0.0, min(100.0, adj)), 1)
+
+        # Bước 1 — kiểm tra ngược xu hướng khung lớn
+        mtf_check = mtf_mod.check_conflict(mtf, side0)
+        st0["mtf_status"] = mtf_check
+        st0["score"] = round(max(0.0, min(100.0, st0["score"] - mtf_check.get("penalty", 0))), 1)
+
+        # Xếp hạng lại theo điểm mới
+        p_, t_ = st0["passed"], st0["total"]
+        rr_ = st0["rr"]
+        if p_ >= 4 and rr_ >= 2:
+            st0["grade"] = "A+ (Rất đẹp)"
+        elif p_ >= 3 and rr_ >= 1.8:
+            st0["grade"] = "A (Đẹp)"
+        elif p_ >= 3:
+            st0["grade"] = "B (Khá)"
+        elif p_ >= 2:
+            st0["grade"] = "C (Trung bình)"
+        else:
+            st0["grade"] = "D (Yếu)"
+
+        # Ép R:R tối thiểu 1:2 (Bước 7) — nếu không đủ thì đánh dấu
+        st0["rr_ok"] = rr_ >= 2.0
+
     # Không còn setup nào sau khi lọc R:R -> trả về rỗng (không bịa)
     # (giữ nguyên hành vi cũ)
 
@@ -607,6 +712,8 @@ def analyze_symbol(df: pd.DataFrame, symbol: str, interval: str, info: Optional[
         "grade": best["grade"] if best else "Không có setup",
         "direction": best["type"] if best else None,
         "lock": lock_info,
+        "mtf": mtf,
+        "mtf_check": mtf_check,
         "candles": candles,
         "time": int(datetime.now(tz=timezone.utc).timestamp()),
     }
